@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Odoo RAG · Agente</title>
+    <meta name="color-scheme" content="light dark" />
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="layout">
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <div>
+            <h1>Odoo RAG</h1>
+            <p class="tagline">Preguntas sobre tus datos indexados</p>
+          </div>
+        </div>
+
+        <div class="panel status-panel" id="statusPanel">
+          <div class="status-row">
+            <span class="label">Estado</span>
+            <span class="pill" id="healthPill">…</span>
+          </div>
+          <div class="status-row subtle">
+            <span class="label">Odoo</span>
+            <span id="odooTarget" class="mono">—</span>
+          </div>
+          <div class="status-row subtle">
+            <span class="label">Índice</span>
+            <span id="indexState" class="mono">—</span>
+          </div>
+        </div>
+
+        <div class="panel actions">
+          <label class="field">
+            <span class="label">Chunks en contexto (top‑k)</span>
+            <input type="number" id="topK" min="1" max="20" value="6" />
+          </label>
+          <button type="button" class="btn secondary" id="btnRebuild">
+            Reindexar desde Odoo
+          </button>
+          <p class="hint">
+            Reindexar vuelve a descargar datos por XML-RPC y regenera embeddings (usa API
+            OpenAI).
+          </p>
+        </div>
+
+        <footer class="sidebar-foot">
+          <span class="mono subtle">python -m odoo_rag web</span>
+        </footer>
+      </aside>
+
+      <main class="chat-shell">
+        <header class="chat-header">
+          <div class="chat-header-text">
+            <h2>Chat</h2>
+            <p class="chat-sub">Consultas RAG y acciones sobre Odoo</p>
+          </div>
+          <button type="button" class="btn ghost btn-clear" id="btnClear" title="Limpiar mensajes">
+            Limpiar
+          </button>
+        </header>
+
+        <div class="messages-wrap">
+          <div class="messages" id="messages" aria-live="polite"></div>
+        </div>
+
+        <form class="composer" id="composer">
+          <div class="composer-panel">
+            <label class="visually-hidden" for="input">Mensaje para el asistente</label>
+            <textarea
+              id="input"
+              class="composer-input"
+              rows="1"
+              placeholder="Escribí tu pregunta o dictá con el micrófono…"
+              autocomplete="off"
+              spellcheck="true"
+            ></textarea>
+            <div class="composer-toolbar">
+              <div class="composer-toolbar-left">
+                <button
+                  type="button"
+                  class="btn mic"
+                  id="btnMic"
+                  aria-pressed="false"
+                  aria-label="Dictar con el micrófono"
+                  title="Dictado: al calar ~2 s se envía solo (Chrome/Edge)"
+                >
+                  <svg class="mic-svg" width="20" height="20" viewBox="0 0 24 24" aria-hidden="true">
+                    <path
+                      fill="currentColor"
+                      d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.91-3c-.49 0-.9.36-.98.85C16.52 14.2 14.47 16 12 16s-4.52-1.8-4.93-4.15c-.08-.49-.49-.85-.98-.85-.61 0-1.09.54-1 1.14.49 3 2.89 5.35 5.91 5.78V20c0 .55.45 1 1 1s1-.45 1-1v-2.08c3.02-.43 5.42-2.78 5.91-5.78.1-.6-.39-1.14-1-1.14z"
+                    />
+                  </svg>
+                  <span id="micLabel">Dictar</span>
+                </button>
+                <span class="mic-hint" id="micHint" hidden></span>
+              </div>
+              <button type="submit" class="btn primary btn-send" id="btnSend">
+                <span>Enviar</span>
+                <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true" class="send-icon">
+                  <path
+                    fill="currentColor"
+                    d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"
+                  />
+                </svg>
+              </button>
+            </div>
+          </div>
+        </form>
+      </main>
+    </div>
+
+    <div class="toast" id="toast" role="status" hidden></div>
+
+    <div
+      class="modal-overlay"
+      id="actionModal"
+      hidden
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="actionModalTitle"
+    >
+      <div class="modal-card">
+        <header class="modal-head">
+          <h3 id="actionModalTitle">Confirmar inserción en Odoo</h3>
+        </header>
+        <p class="modal-lead" id="actionModalLead"></p>
+        <form class="modal-form" id="actionModalForm" novalidate></form>
+        <footer class="modal-foot">
+          <button type="button" class="btn ghost" id="actionModalCancel">Cancelar</button>
+          <button type="button" class="btn primary" id="actionModalConfirm">Insertar en Odoo</button>
+        </footer>
+      </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
