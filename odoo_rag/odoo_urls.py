@@ -28,6 +28,9 @@ def odoo_links_after_create(base_url: str, model: str, record_id: int) -> list[d
         "res.partner": "Contacto en Odoo",
         "product.product": "Producto en Odoo",
         "account.move": "Factura en Odoo",
+        "sale.order": "Pedido de venta en Odoo",
+        "purchase.order": "Pedido de compra en Odoo",
+        "stock.picking": "Operación de stock en Odoo",
     }
     label = titles.get(model, f"Registro en Odoo ({model})")
     return [link_record(base_url, model, record_id, label)]

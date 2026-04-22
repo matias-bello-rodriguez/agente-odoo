@@ -13,7 +13,9 @@ from pydantic import BaseModel, Field
 
 from odoo_rag.actions import (
     build_missing_partner_suggestion,
+    build_missing_vendor_suggestion,
     execute_create,
+    execute_list_query,
     structured_chat_reply,
 )
 from odoo_rag.odoo_urls import odoo_links_after_create, odoo_links_after_product_setup
@@ -51,6 +53,11 @@ class ActionExecuteBody(BaseModel):
 
 class ProductSetupBody(BaseModel):
     plan: dict = Field(default_factory=dict)
+
+
+class ActionListBody(BaseModel):
+    operation: str = Field(default="list", max_length=20)
+    query: str = Field(..., min_length=1, max_length=120)
 
 
 @app.get("/api/health")
@@ -113,6 +120,20 @@ async def api_action_execute(body: ActionExecuteBody) -> dict:
                     "suggested_action": build_missing_partner_suggestion(partner_name),
                 },
             ) from e
+        if msg.startswith("VENDOR_NOT_FOUND::"):
+            vendor_name = msg.split("::", 1)[1].strip()
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "VENDOR_NOT_FOUND",
+                    "message": (
+                        f'No encontré un proveedor con nombre parecido a «{vendor_name}». '
+                        "¿Quieres crearlo primero?"
+                    ),
+                    "vendor_name": vendor_name,
+                    "suggested_action": build_missing_vendor_suggestion(vendor_name),
+                },
+            ) from e
         raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:  # noqa: BLE001
         raise HTTPException(
@@ -146,6 +167,24 @@ async def api_product_setup(body: ProductSetupBody) -> dict:
         orderpoint_id=result.get("orderpoint_id"),
     )
     return {"ok": True, **result, "odoo_links": links}
+
+
+@app.post("/api/action/list")
+async def api_action_list(body: ActionListBody) -> dict:
+    if body.operation != "list":
+        raise HTTPException(status_code=400, detail="Solo se admite operation=list.")
+    settings = load_settings()
+
+    def run() -> dict:
+        return execute_list_query(settings, body.query)
+
+    try:
+        result = await asyncio.to_thread(run)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(e)) from e
+    return {"ok": True, **result}
 
 
 @app.post("/api/index/rebuild")

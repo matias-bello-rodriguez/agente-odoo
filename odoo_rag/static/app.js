@@ -43,6 +43,21 @@ const FIELD_LABELS = {
   invoice_date_due: "Vencimiento",
   ref: "Referencia",
   narration: "Notas de factura",
+  move_kind: "Tipo de factura",
+  invoice_line_qty: "Cantidad línea factura",
+  order_line_name: "Detalle de línea",
+  order_line_qty: "Cantidad",
+  order_line_price_unit: "Precio unitario",
+  client_order_ref: "Referencia cliente",
+  note: "Notas",
+  vendor_name: "Proveedor",
+  partner_ref: "Referencia proveedor",
+  notes: "Notas de compra",
+  picking_type_code: "Tipo de operación stock",
+  origin: "Origen",
+  move_line_name: "Detalle movimiento",
+  product_name: "Producto",
+  move_line_qty: "Cantidad movimiento",
 };
 
 /** @type {SpeechRecognition | null} */
@@ -92,12 +107,12 @@ function formatDetail(detail) {
   }
 }
 
-function tryOfferCreateMissingPartner(detail) {
+function tryOfferSuggestedAction(detail) {
   if (!detail || typeof detail !== "object") return false;
-  if (detail.code !== "PARTNER_NOT_FOUND") return false;
+  if (!["PARTNER_NOT_FOUND", "VENDOR_NOT_FOUND"].includes(detail.code)) return false;
   const msg =
     detail.message ||
-    "No encontré el cliente para la factura. ¿Quieres crearlo ahora?";
+    "No encontré el contacto requerido. ¿Quieres crearlo ahora?";
   appendMessage("assistant", msg);
   const suggestion = detail.suggested_action;
   if (!suggestion || suggestion.operation !== "create" || !suggestion.values) {
@@ -233,6 +248,9 @@ composer.addEventListener("submit", async (e) => {
       data.draft_action.plan
     ) {
       openActionModal(data.draft_action);
+    } else if (data.draft_action && data.draft_action.operation === "list") {
+      openActionModal(data.draft_action);
+      await confirmActionInsert();
     } else if (data.draft_action && data.draft_action.values) {
       openActionModal(data.draft_action);
     }
@@ -462,6 +480,14 @@ function buildModalFields(model, values) {
       actionModalForm.appendChild(wrap);
       continue;
     }
+    if (key === "narration" || key === "note" || key === "notes") {
+      const ta = document.createElement("textarea");
+      ta.dataset.field = key;
+      ta.value = val == null ? "" : String(val);
+      wrap.appendChild(ta);
+      actionModalForm.appendChild(wrap);
+      continue;
+    }
 
     if (key === "type" && model === "product.product") {
       const sel = document.createElement("select");
@@ -485,10 +511,59 @@ function buildModalFields(model, values) {
       actionModalForm.appendChild(wrap);
       continue;
     }
+    if (key === "move_kind" && model === "account.move") {
+      const sel = document.createElement("select");
+      sel.dataset.field = key;
+      const opts = [
+        ["out_invoice", "Factura cliente (out_invoice)"],
+        ["in_invoice", "Factura proveedor (in_invoice)"],
+      ];
+      let cur = String(val || "out_invoice").toLowerCase();
+      for (const [v, t] of opts) {
+        const o = document.createElement("option");
+        o.value = v;
+        o.textContent = t;
+        sel.appendChild(o);
+      }
+      if (!opts.some((x) => x[0] === cur)) cur = "out_invoice";
+      sel.value = cur;
+      wrap.appendChild(sel);
+      actionModalForm.appendChild(wrap);
+      continue;
+    }
+    if (key === "picking_type_code" && model === "stock.picking") {
+      const sel = document.createElement("select");
+      sel.dataset.field = key;
+      const opts = [
+        ["incoming", "Entrada (incoming)"],
+        ["outgoing", "Salida (outgoing)"],
+        ["internal", "Transferencia interna (internal)"],
+      ];
+      let cur = String(val || "internal").toLowerCase();
+      for (const [v, t] of opts) {
+        const o = document.createElement("option");
+        o.value = v;
+        o.textContent = t;
+        sel.appendChild(o);
+      }
+      if (!opts.some((x) => x[0] === cur)) cur = "internal";
+      sel.value = cur;
+      wrap.appendChild(sel);
+      actionModalForm.appendChild(wrap);
+      continue;
+    }
 
     const inp = document.createElement("input");
     inp.dataset.field = key;
-    if (key === "list_price" || key === "standard_price") {
+    if (
+      key === "list_price" ||
+      key === "standard_price" ||
+      key === "invoice_line_price_unit" ||
+      key === "invoice_line_qty" ||
+      key === "order_line_qty" ||
+      key === "order_line_price_unit" ||
+      key === "move_line_qty"
+    ) {
       inp.type = "number";
       inp.step = "0.01";
       inp.min = "0";
@@ -586,10 +661,21 @@ function openActionModal(draft) {
   pendingActionDraft = draft;
   actionModalTitle.textContent = draft.summary || "Confirmar inserción";
   actionModalForm.innerHTML = "";
+  actionModalConfirm.hidden = false;
+  actionModalCancel.textContent = "Cancelar";
+  actionModalConfirm.textContent = "Insertar en Odoo";
   if (draft.operation === "product_setup" && draft.plan) {
     actionModalLead.textContent =
       "Revisá el resumen y confirmá para crear el producto y las reglas en Odoo.";
     actionModalForm.appendChild(buildProductSetupSummary(draft.plan));
+  } else if (draft.operation === "list" && draft.query) {
+    actionModalLead.textContent = "Consulta de registros en Odoo.";
+    actionModalCancel.textContent = "Cerrar";
+    actionModalConfirm.textContent = "Actualizar lista";
+    const info = document.createElement("div");
+    info.className = "modal-plan-summary";
+    info.textContent = "Cargando lista…";
+    actionModalForm.appendChild(info);
   } else {
     actionModalLead.textContent = `${draft.model} · alta nueva`;
     buildModalFields(draft.model, draft.values);
@@ -626,6 +712,29 @@ async function confirmActionInsert() {
   if (!pendingActionDraft) return;
   actionModalConfirm.disabled = true;
   try {
+    if (pendingActionDraft.operation === "list" && pendingActionDraft.query) {
+      const res = await fetch("/api/action/list", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          operation: "list",
+          query: pendingActionDraft.query,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        showToast(formatDetail(data.detail) || "No se pudo cargar la lista.", true);
+        appendMessage(
+          "assistant",
+          formatDetail(data.detail) || "No se pudo obtener la lista solicitada."
+        );
+        actionModalConfirm.disabled = false;
+        return;
+      }
+      renderListResult(data);
+      actionModalConfirm.disabled = false;
+      return;
+    }
     if (pendingActionDraft.operation === "product_setup") {
       const res = await fetch("/api/action/product-setup", {
         method: "POST",
@@ -666,7 +775,7 @@ async function confirmActionInsert() {
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      if (tryOfferCreateMissingPartner(data.detail)) {
+      if (tryOfferSuggestedAction(data.detail)) {
         actionModalConfirm.disabled = false;
         return;
       }
@@ -690,6 +799,147 @@ async function confirmActionInsert() {
     showToast(String(err), true);
     actionModalConfirm.disabled = false;
   }
+}
+
+function renderListResult(data) {
+  actionModalTitle.textContent = data.title || "Lista";
+  actionModalLead.textContent = `Total: ${Number(data.count || 0)} registros.`;
+  actionModalForm.innerHTML = "";
+  const items = Array.isArray(data.items) ? data.items : [];
+  const box = document.createElement("div");
+  box.className = "modal-plan-summary";
+  if (!items.length) {
+    box.textContent =
+      data.query === "users_roles"
+        ? "No se encontraron usuarios."
+        : data.query === "accounting_recent_actions"
+          ? "No se encontraron acciones recientes en facturación."
+          : data.query === "accounting_missing_key_data"
+            ? "No se detectaron facturas con datos clave faltantes."
+            : data.query === "users_last_login"
+              ? "No se encontraron usuarios para revisar conexión."
+              : data.query === "dirty_data_overview"
+                ? "No se detectaron datos sucios con estas reglas."
+        : "No hay órdenes pendientes por entregar.";
+    actionModalForm.appendChild(box);
+    return;
+  }
+  const table = document.createElement("table");
+  table.className = "modal-table";
+  const thead = document.createElement("thead");
+  if (data.query === "users_roles") {
+    thead.innerHTML =
+      "<tr><th>Usuario</th><th>Login</th><th>Activo</th><th>Tipo</th><th>Roles / grupos</th></tr>";
+  } else if (data.query === "accounting_recent_actions") {
+    thead.innerHTML =
+      "<tr><th>Documento</th><th>Tipo</th><th>Estado</th><th>Cliente/Proveedor</th><th>Última actualización</th><th class='num'>Total</th><th>Pago</th></tr>";
+  } else if (data.query === "accounting_missing_key_data") {
+    thead.innerHTML =
+      "<tr><th>Documento</th><th>Tipo</th><th>Estado</th><th>Cliente/Proveedor</th><th>Fecha</th><th>Vencimiento</th><th>Moneda</th><th>Campos faltantes</th></tr>";
+  } else if (data.query === "users_last_login") {
+    thead.innerHTML =
+      "<tr><th>Usuario</th><th>Login</th><th>Activo</th><th>Última conexión</th></tr>";
+  } else if (data.query === "dirty_data_overview") {
+    thead.innerHTML =
+      "<tr><th>Entidad</th><th>Registro</th><th>Problemas detectados</th></tr>";
+  } else {
+    thead.innerHTML =
+      "<tr><th>Pedido</th><th>Cliente</th><th>Fecha</th><th class='num'>Total</th><th>Entrega</th><th>Factura</th></tr>";
+  }
+  table.appendChild(thead);
+  const tbody = document.createElement("tbody");
+  const mapMoveType = (value) => {
+    const v = String(value || "").toLowerCase();
+    if (v === "out_invoice") return "Factura cliente";
+    if (v === "in_invoice") return "Factura proveedor";
+    if (v === "entry") return "Asiento contable";
+    if (v === "out_refund") return "Nota de crédito cliente";
+    if (v === "in_refund") return "Nota de crédito proveedor";
+    return value || "";
+  };
+  const mapState = (value) => {
+    const v = String(value || "").toLowerCase();
+    if (v === "draft") return "Borrador";
+    if (v === "posted") return "Publicado";
+    if (v === "cancel") return "Cancelado";
+    return value || "";
+  };
+  const mapPaymentState = (value) => {
+    const v = String(value || "").toLowerCase();
+    if (v === "not_paid") return "No pagado";
+    if (v === "paid") return "Pagado";
+    if (v === "partial") return "Pago parcial";
+    if (v === "in_payment") return "En pago";
+    if (v === "reversed") return "Revertido";
+    return value || "";
+  };
+  if (data.query === "users_roles") {
+    for (const it of items) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>${it.name || ""}</td>
+        <td>${it.login || ""}</td>
+        <td>${it.active ? "Sí" : "No"}</td>
+        <td>${it.internal_user ? "Interno" : "Portal/Compartido"}</td>
+        <td>${it.roles || "—"}</td>`;
+      tbody.appendChild(tr);
+    }
+  } else if (data.query === "accounting_recent_actions") {
+    for (const it of items) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>${it.name || ""}</td>
+        <td>${mapMoveType(it.move_type)}</td>
+        <td>${mapState(it.state)}</td>
+        <td>${it.partner || ""}</td>
+        <td>${(it.write_date || "").replace("T", " ").slice(0, 19)}</td>
+        <td class="num">${Number(it.amount_total || 0).toLocaleString()}</td>
+        <td>${mapPaymentState(it.payment_state)}</td>`;
+      tbody.appendChild(tr);
+    }
+  } else if (data.query === "accounting_missing_key_data") {
+    for (const it of items) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>${it.name || ""}</td>
+        <td>${mapMoveType(it.move_type)}</td>
+        <td>${mapState(it.state)}</td>
+        <td>${it.partner || ""}</td>
+        <td>${it.invoice_date || ""}</td>
+        <td>${it.invoice_date_due || ""}</td>
+        <td>${it.currency || ""}</td>
+        <td>${it.missing_fields || ""}</td>`;
+      tbody.appendChild(tr);
+    }
+  } else if (data.query === "users_last_login") {
+    for (const it of items) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>${it.name || ""}</td>
+        <td>${it.login || ""}</td>
+        <td>${it.active ? "Sí" : "No"}</td>
+        <td>${it.last_login ? String(it.last_login).replace("T", " ").slice(0, 19) : "Sin registro"}</td>`;
+      tbody.appendChild(tr);
+    }
+  } else if (data.query === "dirty_data_overview") {
+    for (const it of items) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>${it.entity || ""}</td>
+        <td>${it.record || ""}</td>
+        <td>${it.issues || ""}</td>`;
+      tbody.appendChild(tr);
+    }
+  } else {
+    for (const it of items) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>${it.name || ""}</td>
+        <td>${it.customer || ""}</td>
+        <td>${(it.date_order || "").slice(0, 10)}</td>
+        <td class="num">${Number(it.amount_total || 0).toLocaleString()}</td>
+        <td>${it.delivery_status || ""}</td>
+        <td>${it.invoice_status || ""}</td>`;
+      tbody.appendChild(tr);
+    }
+  }
+  table.appendChild(tbody);
+  box.appendChild(table);
+  actionModalForm.appendChild(box);
 }
 
 actionModalCancel.addEventListener("click", () => closeActionModal());

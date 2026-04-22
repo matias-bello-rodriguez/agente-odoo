@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import xmlrpc.client
+from datetime import date
 from typing import Any
 
 from openai import OpenAI
@@ -44,18 +45,60 @@ ALLOWED_CREATE_FIELDS: dict[str, frozenset[str]] = {
     ),
     "account.move": frozenset(
         {
+            "move_kind",
             "partner_name",
             "invoice_line_name",
             "invoice_line_price_unit",
+            "invoice_line_qty",
             "invoice_date",
             "invoice_date_due",
             "ref",
             "narration",
         }
     ),
+    "sale.order": frozenset(
+        {
+            "partner_name",
+            "order_line_name",
+            "order_line_qty",
+            "order_line_price_unit",
+            "client_order_ref",
+            "note",
+        }
+    ),
+    "purchase.order": frozenset(
+        {
+            "vendor_name",
+            "order_line_name",
+            "order_line_qty",
+            "order_line_price_unit",
+            "partner_ref",
+            "notes",
+        }
+    ),
+    "stock.picking": frozenset(
+        {
+            "picking_type_code",
+            "partner_name",
+            "origin",
+            "move_line_name",
+            "product_name",
+            "move_line_qty",
+        }
+    ),
 }
 
 _ALLOWED_MODELS = frozenset(ALLOWED_CREATE_FIELDS.keys())
+_ALLOWED_LIST_QUERIES = frozenset(
+    {
+        "delivery_orders",
+        "users_roles",
+        "accounting_recent_actions",
+        "accounting_missing_key_data",
+        "users_last_login",
+        "dirty_data_overview",
+    }
+)
 
 
 def retrieve_context_chunks(app: AppSettings, question: str, *, top_k: int) -> str:
@@ -82,7 +125,13 @@ def _coerce_value(model: str, field: str, value: Any) -> Any:
             return float(value)
         except (TypeError, ValueError):
             return 0.0
-    if model == "account.move" and field == "invoice_line_price_unit":
+    if field in {
+        "invoice_line_price_unit",
+        "invoice_line_qty",
+        "order_line_qty",
+        "order_line_price_unit",
+        "move_line_qty",
+    }:
         try:
             return float(value)
         except (TypeError, ValueError):
@@ -155,6 +204,16 @@ def sanitize_draft_action(raw: dict[str, Any] | None) -> dict[str, Any] | None:
             "plan": plan,
             "summary": str(summary)[:240],
         }
+    if raw.get("operation") == "list":
+        query = str(raw.get("query") or "").strip()
+        if query not in _ALLOWED_LIST_QUERIES:
+            return None
+        summary = raw.get("summary") or "Lista"
+        return {
+            "operation": "list",
+            "query": query,
+            "summary": str(summary)[:240],
+        }
     if raw.get("operation") != "create":
         return None
     model = raw.get("model")
@@ -183,7 +242,7 @@ _STRUCTURED_SYSTEM = """Eres el asistente de una app web que habla con Odoo por 
 Responde SIEMPRE con UN solo objeto JSON (sin markdown). Campos obligatorios: "reply" (string) y "draft_action" (objeto o null).
 
 ## Cuándo draft_action ES OBLIGATORIO (no puede ser null)
-Si el mensaje del usuario pide **crear, registrar, dar de alta, añadir, insertar o guardar** un contacto, producto o factura de cliente **y aporta al menos el dato principal** (nombre del contacto/producto o cliente en factura), DEBES rellenar draft_action con operation "create" y los valores extraídos del texto del usuario.
+Si el mensaje del usuario pide **crear, registrar, dar de alta, añadir, insertar o guardar** un registro de ventas, compras, inventario, facturación o maestro (contacto/producto) y aporta datos mínimos, DEBES rellenar draft_action con operation "create" y values.
 
 Palabras disparadoras (ejemplos): registra, crea, nuevo contacto, alta de cliente, dar de alta, añade empresa, inserta producto.
 
@@ -199,7 +258,10 @@ No escribas frases como: "debes seguir el procedimiento en Odoo", "completa el r
 ## Campos permitidos en values
 - res.partner: name, email, phone, street, city, zip, vat, is_company (boolean), comment
 - product.product: name, default_code, list_price (precio venta), standard_price (costo), type siempre uno de: "consu" (bienes/material/mercancía), "service" (servicio), "combo". En Odoo 19 NO existe el valor "product"; para material físico usa "consu".
-- account.move (factura cliente): partner_name, invoice_line_name, invoice_line_price_unit, invoice_date, invoice_date_due, ref, narration. Usa model "account.move".
+- account.move (facturas): move_kind ("out_invoice" cliente o "in_invoice" proveedor), partner_name, invoice_line_name, invoice_line_price_unit, invoice_line_qty, invoice_date, invoice_date_due, ref, narration.
+- sale.order (ventas): partner_name, order_line_name, order_line_qty, order_line_price_unit, client_order_ref, note.
+- purchase.order (compras): vendor_name, order_line_name, order_line_qty, order_line_price_unit, partner_ref, notes.
+- stock.picking (inventario): picking_type_code ("incoming","outgoing","internal"), partner_name opcional, origin, product_name, move_line_name, move_line_qty.
 
 Si el usuario dice **costo** o **precio de coste** → standard_price. Si dice **precio de venta** o **PVP** → list_price.
 
@@ -232,8 +294,10 @@ Respuesta JSON:
     "model": "account.move",
     "values": {
       "partner_name": "SODIMAC",
+      "move_kind": "out_invoice",
       "invoice_line_name": "Factura de cliente",
-      "invoice_line_price_unit": 40000
+      "invoice_line_price_unit": 40000,
+      "invoice_line_qty": 1
     },
     "summary": "Factura cliente SODIMAC"
   }
@@ -244,6 +308,81 @@ Respuesta JSON:
 def structured_chat_reply(app: AppSettings, user_message: str, *, top_k: int) -> dict[str, Any]:
     if not app.openai_api_key:
         raise RuntimeError("Falta OPENAI_API_KEY en .env.")
+    lowered = user_message.lower()
+    if (
+        "orden" in lowered
+        and ("entregar" in lowered or "entrega" in lowered)
+        and ("lista" in lowered or "listar" in lowered or "muéstrame" in lowered or "muestrame" in lowered)
+    ):
+        return {
+            "reply": "Preparé la lista de órdenes por entregar. Abro el modal para que la revises.",
+            "draft_action": {
+                "operation": "list",
+                "query": "delivery_orders",
+                "summary": "Órdenes por entregar",
+            },
+        }
+    if (
+        ("usuario" in lowered or "usuarios" in lowered)
+        and ("rol" in lowered or "roles" in lowered or "grupos" in lowered)
+        and ("lista" in lowered or "listar" in lowered or "muéstrame" in lowered or "muestrame" in lowered)
+    ):
+        return {
+            "reply": "Preparé la lista de usuarios y roles. Abro el modal para que la revises.",
+            "draft_action": {
+                "operation": "list",
+                "query": "users_roles",
+                "summary": "Usuarios y roles",
+            },
+        }
+    if (
+        ("factur" in lowered or "contabil" in lowered)
+        and ("ultima" in lowered or "última" in lowered or "reciente" in lowered)
+        and ("accion" in lowered or "acción" in lowered or "acciones" in lowered)
+    ):
+        return {
+            "reply": "Preparé la lista de últimas acciones de facturación. Abro el modal para que la revises.",
+            "draft_action": {
+                "operation": "list",
+                "query": "accounting_recent_actions",
+                "summary": "Últimas acciones en facturación",
+            },
+        }
+    if (
+        "factur" in lowered
+        and ("falt" in lowered or "incomplet" in lowered or "clave" in lowered)
+        and ("dato" in lowered or "campos" in lowered)
+    ):
+        return {
+            "reply": "Revisé facturas con datos clave faltantes. Abro el modal con el detalle.",
+            "draft_action": {
+                "operation": "list",
+                "query": "accounting_missing_key_data",
+                "summary": "Facturas con datos faltantes",
+            },
+        }
+    if (
+        ("ultima" in lowered or "última" in lowered)
+        and ("conexion" in lowered or "conexión" in lowered or "login" in lowered)
+        and ("usuario" in lowered or "usuarios" in lowered)
+    ):
+        return {
+            "reply": "Preparé la lista con la última conexión de usuarios. Abro el modal.",
+            "draft_action": {
+                "operation": "list",
+                "query": "users_last_login",
+                "summary": "Última conexión de usuarios",
+            },
+        }
+    if "dato" in lowered and ("sucio" in lowered or "sucios" in lowered):
+        return {
+            "reply": "Preparé un chequeo de datos sucios. Abro el modal con hallazgos.",
+            "draft_action": {
+                "operation": "list",
+                "query": "dirty_data_overview",
+                "summary": "Datos sucios detectados",
+            },
+        }
     if looks_like_full_product_setup(user_message):
         try:
             out = extract_product_setup_draft(app, user_message)
@@ -258,7 +397,7 @@ def structured_chat_reply(app: AppSettings, user_message: str, *, top_k: int) ->
         f"{ctx}\n\n---\n\n"
         "Mensaje del usuario:\n"
         f"{user_message.strip()}\n\n"
-        "Si el mensaje pide registrar o crear un contacto/producto con datos concretos en el mismo texto, "
+        "Si el mensaje pide registrar o crear registros de ventas, compras, inventario, facturas o maestros con datos concretos en el mismo texto, "
         "debés incluir draft_action con operation create y values rellenados (no solo explicar pasos)."
     )
     completion = client.chat.completions.create(
@@ -305,6 +444,362 @@ def structured_chat_reply(app: AppSettings, user_message: str, *, top_k: int) ->
         )
 
     return {"reply": reply.strip(), "draft_action": draft}
+
+
+def execute_list_query(app: AppSettings, query: str) -> dict[str, Any]:
+    if query not in _ALLOWED_LIST_QUERIES:
+        raise ValueError(f"Consulta no permitida: {query}")
+    client = OdooXmlRpc(app)
+    if query == "users_roles":
+        try:
+            users_fields_meta = client.execute_kw(
+                "res.users",
+                "fields_get",
+                [],
+                {"attributes": ["type", "relation"]},
+            )
+        except xmlrpc.client.Fault as ex:
+            raise ValueError(_format_odoo_fault(ex)) from ex
+        group_field_name = ""
+        for candidate in ("groups_id", "group_ids", "groups"):
+            meta = users_fields_meta.get(candidate) if isinstance(users_fields_meta, dict) else None
+            if isinstance(meta, dict) and meta.get("type") in {"many2many", "many2one"}:
+                group_field_name = candidate
+                break
+        user_read_fields = ["id", "name", "login", "active", "share"]
+        if group_field_name:
+            user_read_fields.append(group_field_name)
+        try:
+            user_rows = client.execute_kw(
+                "res.users",
+                "search_read",
+                [[["active", "in", [True, False]]]],
+                {
+                    "fields": user_read_fields,
+                    "limit": 200,
+                    "order": "id desc",
+                },
+            )
+        except xmlrpc.client.Fault as ex:
+            raise ValueError(_format_odoo_fault(ex)) from ex
+        all_group_ids: set[int] = set()
+        for r in user_rows:
+            gids = r.get(group_field_name) if group_field_name else []
+            if isinstance(gids, tuple):
+                gids = [gids[0]]
+            if isinstance(gids, list):
+                for gid in gids:
+                    try:
+                        all_group_ids.add(int(gid))
+                    except (TypeError, ValueError):
+                        pass
+        group_name_by_id: dict[int, str] = {}
+        if all_group_ids:
+            try:
+                group_rows = client.execute_kw(
+                    "res.groups",
+                    "search_read",
+                    [[["id", "in", sorted(all_group_ids)]]],
+                    {"fields": ["id", "display_name"], "limit": len(all_group_ids) + 5},
+                )
+            except xmlrpc.client.Fault as ex:
+                raise ValueError(_format_odoo_fault(ex)) from ex
+            group_name_by_id = {
+                int(g.get("id")): str(g.get("display_name") or "")
+                for g in group_rows
+                if g.get("id") is not None
+            }
+        items: list[dict[str, Any]] = []
+        for r in user_rows:
+            gids = r.get(group_field_name) if group_field_name else []
+            if isinstance(gids, tuple):
+                gids = [gids[0]]
+            role_names: list[str] = []
+            if isinstance(gids, list):
+                for gid in gids:
+                    try:
+                        gid_i = int(gid)
+                    except (TypeError, ValueError):
+                        continue
+                    nm = group_name_by_id.get(gid_i)
+                    if nm:
+                        role_names.append(nm)
+            items.append(
+                {
+                    "id": int(r.get("id") or 0),
+                    "name": str(r.get("name") or ""),
+                    "login": str(r.get("login") or ""),
+                    "active": bool(r.get("active")),
+                    "internal_user": not bool(r.get("share")),
+                    "roles": ", ".join(sorted(role_names)) if role_names else "—",
+                }
+            )
+        return {
+            "query": "users_roles",
+            "title": "Usuarios y roles",
+            "count": len(items),
+            "items": items,
+        }
+    if query == "accounting_recent_actions":
+        # "Acciones" recientes aproximadas por últimas facturas/documentos contables actualizados.
+        try:
+            rows = client.execute_kw(
+                "account.move",
+                "search_read",
+                [[["state", "in", ["draft", "posted", "cancel"]]]],
+                {
+                    "fields": [
+                        "id",
+                        "name",
+                        "move_type",
+                        "state",
+                        "invoice_date",
+                        "write_date",
+                        "partner_id",
+                        "amount_total",
+                        "currency_id",
+                        "payment_state",
+                    ],
+                    "limit": 120,
+                    "order": "write_date desc, id desc",
+                },
+            )
+        except xmlrpc.client.Fault as ex:
+            raise ValueError(_format_odoo_fault(ex)) from ex
+        items: list[dict[str, Any]] = []
+        for r in rows:
+            partner = r.get("partner_id")
+            currency = r.get("currency_id")
+            items.append(
+                {
+                    "id": int(r.get("id") or 0),
+                    "name": str(r.get("name") or ""),
+                    "partner": partner[1] if isinstance(partner, (list, tuple)) and len(partner) > 1 else "",
+                    "move_type": str(r.get("move_type") or ""),
+                    "state": str(r.get("state") or ""),
+                    "invoice_date": str(r.get("invoice_date") or ""),
+                    "write_date": str(r.get("write_date") or ""),
+                    "amount_total": float(r.get("amount_total") or 0.0),
+                    "currency": currency[1] if isinstance(currency, (list, tuple)) and len(currency) > 1 else "",
+                    "payment_state": str(r.get("payment_state") or ""),
+                }
+            )
+        return {
+            "query": "accounting_recent_actions",
+            "title": "Últimas acciones en facturación",
+            "count": len(items),
+            "items": items,
+        }
+    if query == "accounting_missing_key_data":
+        try:
+            rows = client.execute_kw(
+                "account.move",
+                "search_read",
+                [[["move_type", "in", ["out_invoice", "in_invoice"]], ["state", "!=", "cancel"]]],
+                {
+                    "fields": [
+                        "id",
+                        "name",
+                        "move_type",
+                        "state",
+                        "partner_id",
+                        "invoice_date",
+                        "invoice_date_due",
+                        "invoice_payment_term_id",
+                        "currency_id",
+                        "invoice_line_ids",
+                        "amount_total",
+                    ],
+                    "limit": 300,
+                    "order": "id desc",
+                },
+            )
+        except xmlrpc.client.Fault as ex:
+            raise ValueError(_format_odoo_fault(ex)) from ex
+        items: list[dict[str, Any]] = []
+        for r in rows:
+            partner = r.get("partner_id")
+            currency = r.get("currency_id")
+            missing: list[str] = []
+            if not partner:
+                missing.append("Cliente/Proveedor")
+            if not r.get("invoice_date"):
+                missing.append("Fecha factura")
+            if not r.get("invoice_date_due"):
+                missing.append("Vencimiento")
+            if not r.get("currency_id"):
+                missing.append("Moneda")
+            lines = r.get("invoice_line_ids") or []
+            if not isinstance(lines, list) or len(lines) == 0:
+                missing.append("Líneas de factura")
+            if float(r.get("amount_total") or 0.0) <= 0:
+                missing.append("Total > 0")
+            if missing:
+                items.append(
+                    {
+                        "id": int(r.get("id") or 0),
+                        "name": str(r.get("name") or ""),
+                        "move_type": str(r.get("move_type") or ""),
+                        "state": str(r.get("state") or ""),
+                        "partner": partner[1] if isinstance(partner, (list, tuple)) and len(partner) > 1 else "",
+                        "invoice_date": str(r.get("invoice_date") or ""),
+                        "invoice_date_due": str(r.get("invoice_date_due") or ""),
+                        "currency": (
+                            currency[1] if isinstance(currency, (list, tuple)) and len(currency) > 1 else ""
+                        ),
+                        "missing_fields": ", ".join(missing),
+                    }
+                )
+        return {
+            "query": "accounting_missing_key_data",
+            "title": "Facturas con datos clave faltantes",
+            "count": len(items),
+            "items": items,
+        }
+    if query == "users_last_login":
+        try:
+            users_fields_meta = client.execute_kw(
+                "res.users",
+                "fields_get",
+                [],
+                {"attributes": ["type"]},
+            )
+        except xmlrpc.client.Fault as ex:
+            raise ValueError(_format_odoo_fault(ex)) from ex
+        last_login_field = ""
+        for candidate in ("login_date", "last_login", "write_date"):
+            if isinstance(users_fields_meta, dict) and candidate in users_fields_meta:
+                last_login_field = candidate
+                break
+        read_fields = ["id", "name", "login", "active"]
+        if last_login_field:
+            read_fields.append(last_login_field)
+        try:
+            rows = client.execute_kw(
+                "res.users",
+                "search_read",
+                [[["active", "in", [True, False]]]],
+                {"fields": read_fields, "limit": 200, "order": "id desc"},
+            )
+        except xmlrpc.client.Fault as ex:
+            raise ValueError(_format_odoo_fault(ex)) from ex
+        items: list[dict[str, Any]] = []
+        for r in rows:
+            items.append(
+                {
+                    "id": int(r.get("id") or 0),
+                    "name": str(r.get("name") or ""),
+                    "login": str(r.get("login") or ""),
+                    "active": bool(r.get("active")),
+                    "last_login": str(r.get(last_login_field) or ""),
+                }
+            )
+        return {
+            "query": "users_last_login",
+            "title": "Última conexión de usuarios",
+            "count": len(items),
+            "items": items,
+        }
+    if query == "dirty_data_overview":
+        out: list[dict[str, Any]] = []
+        try:
+            partner_rows = client.execute_kw(
+                "res.partner",
+                "search_read",
+                [[["active", "=", True], ["is_company", "=", True]]],
+                {"fields": ["id", "name", "email", "vat", "phone"], "limit": 250, "order": "id desc"},
+            )
+            for p in partner_rows:
+                issues: list[str] = []
+                if not str(p.get("name") or "").strip():
+                    issues.append("Nombre vacío")
+                if not str(p.get("email") or "").strip():
+                    issues.append("Email vacío")
+                if not str(p.get("vat") or "").strip():
+                    issues.append("RUT/VAT vacío")
+                if issues:
+                    out.append(
+                        {
+                            "entity": "Cliente/Empresa",
+                            "record": str(p.get("name") or f"ID {p.get('id')}"),
+                            "issues": ", ".join(issues),
+                        }
+                    )
+        except xmlrpc.client.Fault as ex:
+            raise ValueError(_format_odoo_fault(ex)) from ex
+        try:
+            product_rows = client.execute_kw(
+                "product.product",
+                "search_read",
+                [[["active", "=", True]]],
+                {"fields": ["id", "name", "default_code", "list_price"], "limit": 250, "order": "id desc"},
+            )
+            for p in product_rows:
+                issues = []
+                if not str(p.get("default_code") or "").strip():
+                    issues.append("Referencia interna vacía")
+                if float(p.get("list_price") or 0.0) <= 0:
+                    issues.append("Precio de venta <= 0")
+                if issues:
+                    out.append(
+                        {
+                            "entity": "Producto",
+                            "record": str(p.get("name") or f"ID {p.get('id')}"),
+                            "issues": ", ".join(issues),
+                        }
+                    )
+        except xmlrpc.client.Fault as ex:
+            raise ValueError(_format_odoo_fault(ex)) from ex
+        return {
+            "query": "dirty_data_overview",
+            "title": "Datos sucios detectados",
+            "count": len(out),
+            "items": out,
+        }
+
+    rows = client.execute_kw(
+        "sale.order",
+        "search_read",
+        [[["state", "in", ["sale", "done"]], ["delivery_status", "!=", "full"]]],
+        {
+            "fields": [
+                "id",
+                "name",
+                "partner_id",
+                "date_order",
+                "amount_total",
+                "currency_id",
+                "state",
+                "delivery_status",
+                "invoice_status",
+            ],
+            "limit": 120,
+            "order": "date_order desc, id desc",
+        },
+    )
+    items: list[dict[str, Any]] = []
+    for r in rows:
+        partner = r.get("partner_id")
+        currency = r.get("currency_id")
+        items.append(
+            {
+                "id": int(r.get("id") or 0),
+                "name": str(r.get("name") or ""),
+                "customer": partner[1] if isinstance(partner, (list, tuple)) and len(partner) > 1 else "",
+                "date_order": str(r.get("date_order") or ""),
+                "amount_total": float(r.get("amount_total") or 0.0),
+                "currency": currency[1] if isinstance(currency, (list, tuple)) and len(currency) > 1 else "",
+                "state": str(r.get("state") or ""),
+                "delivery_status": str(r.get("delivery_status") or ""),
+                "invoice_status": str(r.get("invoice_status") or ""),
+            }
+        )
+    return {
+        "query": "delivery_orders",
+        "title": "Órdenes por entregar",
+        "count": len(items),
+        "items": items,
+    }
 
 
 def _format_odoo_fault(exc: xmlrpc.client.Fault) -> str:
@@ -359,15 +854,74 @@ def _find_partner_id_by_name(client: OdooXmlRpc, partner_name: str) -> int:
     return int(picked["id"])
 
 
+def _find_vendor_id_by_name(client: OdooXmlRpc, vendor_name: str) -> int:
+    name = str(vendor_name or "").strip()
+    if not name:
+        raise ValueError("El nombre del proveedor es obligatorio.")
+    rows = client.execute_kw(
+        "res.partner",
+        "search_read",
+        [[["name", "ilike", name], ["supplier_rank", ">=", 0]]],
+        {"fields": ["id", "name"], "limit": 5, "order": "id desc"},
+    )
+    if not rows:
+        raise ValueError(f"VENDOR_NOT_FOUND::{name}")
+    exact = [r for r in rows if str(r.get("name", "")).strip().lower() == name.lower()]
+    picked = exact[0] if exact else rows[0]
+    return int(picked["id"])
+
+
+def _find_product_id_by_name(client: OdooXmlRpc, product_name: str) -> int:
+    name = str(product_name or "").strip()
+    if not name:
+        raise ValueError("El nombre del producto es obligatorio.")
+    rows = client.execute_kw(
+        "product.product",
+        "search_read",
+        [[["name", "ilike", name], ["active", "=", True]]],
+        {"fields": ["id", "name"], "limit": 5, "order": "id desc"},
+    )
+    if not rows:
+        raise ValueError(f"PRODUCT_NOT_FOUND::{name}")
+    exact = [r for r in rows if str(r.get("name", "")).strip().lower() == name.lower()]
+    picked = exact[0] if exact else rows[0]
+    return int(picked["id"])
+
+
+def _find_picking_type_id(client: OdooXmlRpc, code: str) -> int:
+    wanted = str(code or "").strip().lower() or "internal"
+    if wanted not in {"incoming", "outgoing", "internal"}:
+        wanted = "internal"
+    rows = client.execute_kw(
+        "stock.picking.type",
+        "search_read",
+        [[["code", "=", wanted]]],
+        {"fields": ["id"], "limit": 1, "order": "id asc"},
+    )
+    if not rows:
+        raise ValueError(
+            f"No existe un tipo de operación de inventario para código '{wanted}'."
+        )
+    return int(rows[0]["id"])
+
+
 def _build_invoice_create_vals(client: OdooXmlRpc, cleaned: dict[str, Any]) -> dict[str, Any]:
     partner_name = str(cleaned.get("partner_name") or "").strip()
     line_name = str(cleaned.get("invoice_line_name") or "").strip() or "Servicio"
     amount = cleaned.get("invoice_line_price_unit")
     if amount in (None, ""):
         raise ValueError("El monto de la factura es obligatorio.")
-    partner_id = _find_partner_id_by_name(client, partner_name)
+    qty = float(cleaned.get("invoice_line_qty") or 1.0)
+    move_kind = str(cleaned.get("move_kind") or "out_invoice").strip().lower()
+    if move_kind not in {"out_invoice", "in_invoice"}:
+        move_kind = "out_invoice"
+    partner_id = (
+        _find_vendor_id_by_name(client, partner_name)
+        if move_kind == "in_invoice"
+        else _find_partner_id_by_name(client, partner_name)
+    )
     vals: dict[str, Any] = {
-        "move_type": "out_invoice",
+        "move_type": move_kind,
         "partner_id": partner_id,
         "invoice_line_ids": [
             (
@@ -375,7 +929,7 @@ def _build_invoice_create_vals(client: OdooXmlRpc, cleaned: dict[str, Any]) -> d
                 0,
                 {
                     "name": line_name,
-                    "quantity": 1.0,
+                    "quantity": qty if qty > 0 else 1.0,
                     "price_unit": float(amount),
                 },
             )
@@ -392,6 +946,86 @@ def _build_invoice_create_vals(client: OdooXmlRpc, cleaned: dict[str, Any]) -> d
     return vals
 
 
+def _build_sale_order_create_vals(client: OdooXmlRpc, cleaned: dict[str, Any]) -> dict[str, Any]:
+    partner_id = _find_partner_id_by_name(client, cleaned.get("partner_name"))
+    qty = float(cleaned.get("order_line_qty") or 1.0)
+    price = float(cleaned.get("order_line_price_unit") or 0.0)
+    line_name = str(cleaned.get("order_line_name") or "").strip() or "Línea de venta"
+    vals: dict[str, Any] = {
+        "partner_id": partner_id,
+        "order_line": [
+            (
+                0,
+                0,
+                {
+                    "name": line_name,
+                    "product_uom_qty": qty if qty > 0 else 1.0,
+                    "price_unit": price,
+                },
+            )
+        ],
+    }
+    if cleaned.get("client_order_ref"):
+        vals["client_order_ref"] = str(cleaned["client_order_ref"])
+    if cleaned.get("note"):
+        vals["note"] = str(cleaned["note"])
+    return vals
+
+
+def _build_purchase_order_create_vals(client: OdooXmlRpc, cleaned: dict[str, Any]) -> dict[str, Any]:
+    partner_id = _find_vendor_id_by_name(client, cleaned.get("vendor_name"))
+    qty = float(cleaned.get("order_line_qty") or 1.0)
+    price = float(cleaned.get("order_line_price_unit") or 0.0)
+    line_name = str(cleaned.get("order_line_name") or "").strip() or "Línea de compra"
+    vals: dict[str, Any] = {
+        "partner_id": partner_id,
+        "order_line": [
+            (
+                0,
+                0,
+                {
+                    "name": line_name,
+                    "product_qty": qty if qty > 0 else 1.0,
+                    "price_unit": price,
+                    "date_planned": str(date.today()),
+                },
+            )
+        ],
+    }
+    if cleaned.get("partner_ref"):
+        vals["partner_ref"] = str(cleaned["partner_ref"])
+    if cleaned.get("notes"):
+        vals["notes"] = str(cleaned["notes"])
+    return vals
+
+
+def _build_stock_picking_create_vals(client: OdooXmlRpc, cleaned: dict[str, Any]) -> dict[str, Any]:
+    product_id = _find_product_id_by_name(client, cleaned.get("product_name"))
+    picking_type_id = _find_picking_type_id(client, cleaned.get("picking_type_code"))
+    qty = float(cleaned.get("move_line_qty") or 1.0)
+    line_name = str(cleaned.get("move_line_name") or "").strip() or "Movimiento de stock"
+    vals: dict[str, Any] = {
+        "picking_type_id": picking_type_id,
+        "move_ids_without_package": [
+            (
+                0,
+                0,
+                {
+                    "name": line_name,
+                    "product_id": product_id,
+                    "product_uom_qty": qty if qty > 0 else 1.0,
+                },
+            )
+        ],
+    }
+    partner_name = str(cleaned.get("partner_name") or "").strip()
+    if partner_name:
+        vals["partner_id"] = _find_partner_id_by_name(client, partner_name)
+    if cleaned.get("origin"):
+        vals["origin"] = str(cleaned["origin"])
+    return vals
+
+
 def build_missing_partner_suggestion(partner_name: str) -> dict[str, Any]:
     guessed_name = str(partner_name or "").strip()
     return {
@@ -405,6 +1039,19 @@ def build_missing_partner_suggestion(partner_name: str) -> dict[str, Any]:
     }
 
 
+def build_missing_vendor_suggestion(vendor_name: str) -> dict[str, Any]:
+    guessed_name = str(vendor_name or "").strip()
+    return {
+        "operation": "create",
+        "model": "res.partner",
+        "values": {
+            "name": guessed_name,
+            "is_company": True,
+        },
+        "summary": f"Crear proveedor {guessed_name}" if guessed_name else "Crear proveedor",
+    }
+
+
 def execute_create(app: AppSettings, model: str, values: dict[str, Any]) -> int:
     cleaned = sanitize_values_for_model(model, values)
     if not cleaned.get("name") and model == "res.partner":
@@ -415,6 +1062,12 @@ def execute_create(app: AppSettings, model: str, values: dict[str, Any]) -> int:
     payload = cleaned
     if model == "account.move":
         payload = _build_invoice_create_vals(client, cleaned)
+    if model == "sale.order":
+        payload = _build_sale_order_create_vals(client, cleaned)
+    if model == "purchase.order":
+        payload = _build_purchase_order_create_vals(client, cleaned)
+    if model == "stock.picking":
+        payload = _build_stock_picking_create_vals(client, cleaned)
     if model == "product.product" and cleaned.get("name"):
         _preflight_duplicate_product_by_name(client, cleaned["name"])
     try:
