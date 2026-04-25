@@ -15,7 +15,9 @@ from odoo_rag.actions import (
     build_missing_partner_suggestion,
     build_missing_vendor_suggestion,
     execute_create,
+    execute_email_action,
     execute_list_query,
+    execute_workflow,
     structured_chat_reply,
 )
 from odoo_rag.odoo_urls import odoo_links_after_create, odoo_links_after_product_setup
@@ -58,6 +60,19 @@ class ProductSetupBody(BaseModel):
 class ActionListBody(BaseModel):
     operation: str = Field(default="list", max_length=20)
     query: str = Field(..., min_length=1, max_length=120)
+    params: dict = Field(default_factory=dict)
+
+
+class ActionEmailBody(BaseModel):
+    operation: str = Field(default="email", max_length=20)
+    target: str = Field(..., min_length=1, max_length=40)
+    params: dict = Field(default_factory=dict)
+
+
+class ActionWorkflowBody(BaseModel):
+    operation: str = Field(default="workflow", max_length=20)
+    name: str = Field(..., min_length=1, max_length=80)
+    params: dict = Field(default_factory=dict)
 
 
 @app.get("/api/health")
@@ -176,7 +191,43 @@ async def api_action_list(body: ActionListBody) -> dict:
     settings = load_settings()
 
     def run() -> dict:
-        return execute_list_query(settings, body.query)
+        return execute_list_query(settings, body.query, body.params)
+
+    try:
+        result = await asyncio.to_thread(run)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(e)) from e
+    return {"ok": True, **result}
+
+
+@app.post("/api/action/email")
+async def api_action_email(body: ActionEmailBody) -> dict:
+    if body.operation != "email":
+        raise HTTPException(status_code=400, detail="Solo se admite operation=email.")
+    settings = load_settings()
+
+    def run() -> dict:
+        return execute_email_action(settings, body.target, body.params)
+
+    try:
+        result = await asyncio.to_thread(run)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(e)) from e
+    return {"ok": True, **result}
+
+
+@app.post("/api/action/workflow")
+async def api_action_workflow(body: ActionWorkflowBody) -> dict:
+    if body.operation != "workflow":
+        raise HTTPException(status_code=400, detail="Solo se admite operation=workflow.")
+    settings = load_settings()
+
+    def run() -> dict:
+        return execute_workflow(settings, body.name, body.params)
 
     try:
         result = await asyncio.to_thread(run)

@@ -33,6 +33,31 @@
           </div>
         </div>
 
+        <div class="panel modules-panel" id="modulesPanel">
+          <span class="label">Módulos Odoo</span>
+          <button type="button" class="module-item active" data-module="dashboard" data-prompt="Muéstrame el dashboard general con KPIs">
+            <span class="module-dot" style="background:#714b67"></span> Dashboard
+          </button>
+          <button type="button" class="module-item" data-module="ventas" data-prompt="Lista las órdenes por entregar">
+            <span class="module-dot" style="background:#00a09d"></span> Ventas
+          </button>
+          <button type="button" class="module-item" data-module="compras" data-prompt="Muéstrame el proveedor más barato para producto SILLA">
+            <span class="module-dot" style="background:#f0ad4e"></span> Compras
+          </button>
+          <button type="button" class="module-item" data-module="inventario" data-prompt="Revisa productos bajo mínimo de stock">
+            <span class="module-dot" style="background:#5cb85c"></span> Inventario
+          </button>
+          <button type="button" class="module-item" data-module="contabilidad" data-prompt="Muéstrame las facturas vencidas">
+            <span class="module-dot" style="background:#d9534f"></span> Contabilidad
+          </button>
+          <button type="button" class="module-item" data-module="rrhh" data-prompt="Calcula preview de sueldo con horas extra y bono">
+            <span class="module-dot" style="background:#5bc0de"></span> RRHH
+          </button>
+          <button type="button" class="module-item" data-module="correos" data-prompt="Envía un correo a">
+            <span class="module-dot" style="background:#714b67"></span> Correos
+          </button>
+        </div>
+
         <div class="panel actions">
           <label class="field">
             <span class="label">Chunks en contexto (top‑k)</span>
@@ -55,13 +80,23 @@
       <main class="chat-shell">
         <header class="chat-header">
           <div class="chat-header-text">
-            <h2>Chat</h2>
-            <p class="chat-sub">Consultas RAG y acciones sobre Odoo</p>
+            <span class="module-crumb" id="moduleCrumb">Discusión</span>
+            <h2>Asistente Odoo</h2>
+            <p class="chat-sub">Conversa, ejecuta acciones y revisa KPIs sin salir del chat</p>
           </div>
           <button type="button" class="btn ghost btn-clear" id="btnClear" title="Limpiar mensajes">
             Limpiar
           </button>
         </header>
+
+        <div class="quick-prompts" id="quickPrompts">
+          <button type="button" class="quick-prompt" data-prompt="Muéstrame el dashboard general con KPIs">📊 Dashboard</button>
+          <button type="button" class="quick-prompt" data-prompt="Lista las órdenes por entregar">🚚 Órdenes por entregar</button>
+          <button type="button" class="quick-prompt" data-prompt="Muéstrame las facturas vencidas">⚠️ Facturas vencidas</button>
+          <button type="button" class="quick-prompt" data-prompt="Revisa productos bajo mínimo de stock">📦 Stock bajo</button>
+          <button type="button" class="quick-prompt" data-prompt="Envía un correo a ventas@example.com asunto seguimiento">✉️ Enviar correo</button>
+          <button type="button" class="quick-prompt" data-prompt="Ejecuta el flujo lead a pago para cliente ACME por 50000">⚡ Flujo lead→pago</button>
+        </div>
 
         <div class="messages-wrap">
           <div class="messages" id="messages" aria-live="polite"></div>

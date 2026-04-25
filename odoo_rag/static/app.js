@@ -48,6 +48,7 @@ const FIELD_LABELS = {
   order_line_name: "Detalle de línea",
   order_line_qty: "Cantidad",
   order_line_price_unit: "Precio unitario",
+  order_line_discount: "Descuento (%)",
   client_order_ref: "Referencia cliente",
   note: "Notas",
   vendor_name: "Proveedor",
@@ -251,6 +252,10 @@ composer.addEventListener("submit", async (e) => {
     } else if (data.draft_action && data.draft_action.operation === "list") {
       openActionModal(data.draft_action);
       await confirmActionInsert();
+    } else if (data.draft_action && data.draft_action.operation === "email") {
+      openActionModal(data.draft_action);
+    } else if (data.draft_action && data.draft_action.operation === "workflow") {
+      openActionModal(data.draft_action);
     } else if (data.draft_action && data.draft_action.values) {
       openActionModal(data.draft_action);
     }
@@ -562,6 +567,7 @@ function buildModalFields(model, values) {
       key === "invoice_line_qty" ||
       key === "order_line_qty" ||
       key === "order_line_price_unit" ||
+      key === "order_line_discount" ||
       key === "move_line_qty"
     ) {
       inp.type = "number";
@@ -575,6 +581,88 @@ function buildModalFields(model, values) {
     wrap.appendChild(inp);
     actionModalForm.appendChild(wrap);
   }
+}
+
+function buildEmailFields(draft) {
+  actionModalForm.innerHTML = "";
+  const p = (draft && draft.params) || {};
+  const targetMap = {
+    partner: "Contacto",
+    invoice: "Factura",
+    sale_order: "Orden de venta",
+    purchase_order: "Orden de compra",
+  };
+  const targetWrap = document.createElement("div");
+  targetWrap.className = "modal-field";
+  const targetLbl = document.createElement("span");
+  targetLbl.className = "label";
+  targetLbl.textContent = "Tipo de destinatario";
+  const targetSel = document.createElement("select");
+  targetSel.dataset.field = "_target";
+  for (const [v, t] of Object.entries(targetMap)) {
+    const o = document.createElement("option");
+    o.value = v;
+    o.textContent = t;
+    if (v === draft.target) o.selected = true;
+    targetSel.appendChild(o);
+  }
+  targetWrap.appendChild(targetLbl);
+  targetWrap.appendChild(targetSel);
+  actionModalForm.appendChild(targetWrap);
+
+  function addInput(field, label, value, opts = {}) {
+    const wrap = document.createElement("div");
+    wrap.className = "modal-field";
+    const l = document.createElement("span");
+    l.className = "label";
+    l.textContent = label;
+    const inp = opts.textarea ? document.createElement("textarea") : document.createElement("input");
+    if (!opts.textarea) inp.type = opts.type || "text";
+    inp.dataset.field = field;
+    inp.value = value == null ? "" : String(value);
+    if (opts.placeholder) inp.placeholder = opts.placeholder;
+    if (opts.textarea) inp.rows = 8;
+    wrap.appendChild(l);
+    wrap.appendChild(inp);
+    actionModalForm.appendChild(wrap);
+  }
+  addInput("to_name", "Nombre destinatario", p.to_name || "", { placeholder: "p. ej. SODIMAC" });
+  addInput("to_email", "Correo destinatario", p.to_email || "", { type: "email", placeholder: "ventas@cliente.cl" });
+  addInput("record_id", "ID registro vinculado (opcional)", p.record_id || "", { type: "number" });
+  addInput("subject", "Asunto", p.subject || "Mensaje desde Odoo");
+  addInput("body", "Mensaje", p.body || "", { textarea: true, placeholder: "Escribe el contenido del correo. Soporta saltos de línea." });
+}
+
+function buildWorkflowFields(draft) {
+  actionModalForm.innerHTML = "";
+  const p = (draft && draft.params) || {};
+  function addInput(field, label, value, opts = {}) {
+    const wrap = document.createElement("div");
+    wrap.className = "modal-field";
+    const l = document.createElement("span");
+    l.className = "label";
+    l.textContent = label;
+    const inp = document.createElement("input");
+    inp.type = opts.type || "text";
+    inp.dataset.field = field;
+    inp.value = value == null ? "" : String(value);
+    if (opts.step) inp.step = opts.step;
+    if (opts.min) inp.min = opts.min;
+    if (opts.placeholder) inp.placeholder = opts.placeholder;
+    wrap.appendChild(l);
+    wrap.appendChild(inp);
+    actionModalForm.appendChild(wrap);
+  }
+  addInput("partner_name", "Cliente (se crea si no existe)", p.partner_name || "", { placeholder: "ACME SA" });
+  addInput("product_name", "Producto/servicio (opcional)", p.product_name || "", { placeholder: "Consultoría" });
+  addInput("amount", "Monto total", p.amount || 0, { type: "number", step: "0.01", min: "0" });
+  addInput("qty", "Cantidad", p.qty || 1, { type: "number", step: "1", min: "1" });
+
+  const note = document.createElement("p");
+  note.className = "hint";
+  note.style.margin = "0.4rem 0 0";
+  note.textContent = "Pasos: buscar/crear cliente → cotización → confirmar venta → generar factura → validar factura.";
+  actionModalForm.appendChild(note);
 }
 
 /** Resumen legible del plan product_setup (sin JSON crudo). */
@@ -676,6 +764,14 @@ function openActionModal(draft) {
     info.className = "modal-plan-summary";
     info.textContent = "Cargando lista…";
     actionModalForm.appendChild(info);
+  } else if (draft.operation === "email") {
+    actionModalLead.textContent = "Enviar correo desde Odoo (mail.mail).";
+    actionModalConfirm.textContent = "Enviar correo";
+    buildEmailFields(draft);
+  } else if (draft.operation === "workflow") {
+    actionModalLead.textContent = "Workflow encadenado: cliente → cotización → venta → factura → validación.";
+    actionModalConfirm.textContent = "Ejecutar flujo";
+    buildWorkflowFields(draft);
   } else {
     actionModalLead.textContent = `${draft.model} · alta nueva`;
     buildModalFields(draft.model, draft.values);
@@ -719,6 +815,7 @@ async function confirmActionInsert() {
         body: JSON.stringify({
           operation: "list",
           query: pendingActionDraft.query,
+          params: pendingActionDraft.params || {},
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -732,6 +829,60 @@ async function confirmActionInsert() {
         return;
       }
       renderListResult(data);
+      actionModalConfirm.disabled = false;
+      return;
+    }
+    if (pendingActionDraft.operation === "email") {
+      const vals = gatherModalValues();
+      const target = vals._target || pendingActionDraft.target || "partner";
+      const params = {
+        to_name: vals.to_name || "",
+        to_email: vals.to_email || "",
+        subject: vals.subject || "",
+        body: vals.body || "",
+        record_id: vals.record_id ? Number(vals.record_id) : 0,
+      };
+      const res = await fetch("/api/action/email", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ operation: "email", target, params }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        showToast(formatDetail(data.detail) || "No se pudo enviar el correo.", true);
+        appendMessage("assistant", formatDetail(data.detail) || "No se pudo enviar el correo.");
+        actionModalConfirm.disabled = false;
+        return;
+      }
+      showToast(`Correo enviado a ${data.to}`);
+      appendMessage(
+        "assistant",
+        `Correo enviado por Odoo (mail.mail id ${data.mail_id}) a ${data.to}. Asunto: «${data.subject}».`
+      );
+      closeActionModal();
+      return;
+    }
+    if (pendingActionDraft.operation === "workflow") {
+      const vals = gatherModalValues();
+      const params = {
+        partner_name: vals.partner_name || "",
+        product_name: vals.product_name || "",
+        amount: vals.amount ? Number(vals.amount) : 0,
+        qty: vals.qty ? Number(vals.qty) : 1,
+      };
+      const res = await fetch("/api/action/workflow", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ operation: "workflow", name: pendingActionDraft.name, params }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        showToast(formatDetail(data.detail) || "Falló el workflow.", true);
+        appendMessage("assistant", formatDetail(data.detail) || "Falló el workflow en Odoo.");
+        actionModalConfirm.disabled = false;
+        return;
+      }
+      renderWorkflowResult(data);
       actionModalConfirm.disabled = false;
       return;
     }
@@ -801,7 +952,136 @@ async function confirmActionInsert() {
   }
 }
 
+function renderWorkflowResult(data) {
+  actionModalTitle.textContent = "Resultado workflow";
+  actionModalLead.textContent = data.ok
+    ? "El flujo se ejecutó completo en Odoo."
+    : "Algunos pasos fallaron. Revisa los detalles.";
+  actionModalForm.innerHTML = "";
+  const wrap = document.createElement("div");
+  wrap.className = "workflow-steps";
+  const steps = Array.isArray(data.steps) ? data.steps : [];
+  steps.forEach((s, idx) => {
+    const row = document.createElement("div");
+    row.className = `workflow-step ${s.ok ? "ok" : "fail"}`;
+    const num = document.createElement("div");
+    num.className = "step-num";
+    num.textContent = String(idx + 1);
+    const mid = document.createElement("div");
+    const name = document.createElement("div");
+    name.className = "step-name";
+    name.textContent = s.step || `Paso ${idx + 1}`;
+    const det = document.createElement("div");
+    det.className = "step-detail";
+    det.textContent = s.detail || "";
+    mid.appendChild(name);
+    mid.appendChild(det);
+    const badge = document.createElement("span");
+    badge.className = `badge ${s.ok ? "success" : "danger"}`;
+    badge.textContent = s.ok ? "OK" : "Falló";
+    row.appendChild(num);
+    row.appendChild(mid);
+    row.appendChild(badge);
+    wrap.appendChild(row);
+  });
+  actionModalForm.appendChild(wrap);
+}
+
+function renderDashboardResult(data) {
+  actionModalTitle.textContent = data.title || "Dashboard";
+  actionModalLead.textContent = "KPIs en tiempo real desde Odoo.";
+  actionModalForm.innerHTML = "";
+  const k = data.kpis || {};
+  const fmt = (n) => Number(n || 0).toLocaleString();
+
+  const grid = document.createElement("div");
+  grid.className = "dashboard-grid";
+  const cards = [
+    { label: "Ventas (mes)", value: fmt(k.sales_month), kind: "accent", sub: "Confirmadas+terminadas" },
+    { label: "Facturado (mes)", value: fmt(k.invoiced_month), kind: "success", sub: "Facturas cliente posteadas" },
+    { label: "Vencido", value: fmt(k.overdue_amount), kind: "danger", sub: `${fmt(k.overdue_count)} factura(s)` },
+    { label: "Compras (mes)", value: fmt(k.purchases_month), kind: "warn", sub: "Órdenes confirmadas" },
+    { label: "Cotizaciones", value: fmt(k.open_quotations), kind: "", sub: "Borrador / enviadas" },
+    { label: "Órdenes confirmadas", value: fmt(k.confirmed_orders), kind: "accent", sub: "Sale orders activas" },
+    { label: "Entregas pendientes", value: fmt(k.pickings_pending), kind: "warn", sub: "Pickings asignados/pendientes" },
+    { label: "Borradores factura", value: fmt(k.draft_invoices), kind: "", sub: "Por revisar" },
+    { label: "Clientes", value: fmt(k.customers), kind: "", sub: "Total activos" },
+    { label: "Proveedores", value: fmt(k.vendors), kind: "", sub: "Total activos" },
+    { label: "Productos", value: fmt(k.products), kind: "", sub: "Activos" },
+  ];
+  cards.forEach((c) => {
+    const card = document.createElement("div");
+    card.className = `kpi-card ${c.kind}`;
+    const lab = document.createElement("div"); lab.className = "kpi-label"; lab.textContent = c.label;
+    const val = document.createElement("div"); val.className = "kpi-value"; val.textContent = c.value;
+    const sub = document.createElement("div"); sub.className = "kpi-sub"; sub.textContent = c.sub;
+    card.appendChild(lab);
+    card.appendChild(val);
+    card.appendChild(sub);
+    grid.appendChild(card);
+  });
+  actionModalForm.appendChild(grid);
+
+  const tops = Array.isArray(data.top_customers) ? data.top_customers : [];
+  if (tops.length) {
+    const sect = document.createElement("div");
+    sect.className = "dashboard-section";
+    const h = document.createElement("h4");
+    h.textContent = "Top clientes facturados (mes)";
+    sect.appendChild(h);
+    const max = tops.reduce((m, x) => Math.max(m, Number(x.amount || 0)), 0) || 1;
+    tops.forEach((t) => {
+      const row = document.createElement("div");
+      row.className = "bar-row";
+      const name = document.createElement("div"); name.className = "bar-name"; name.textContent = t.name || "—";
+      const track = document.createElement("div"); track.className = "bar-track";
+      const fill = document.createElement("div"); fill.className = "bar-fill";
+      fill.style.width = `${Math.max(2, (Number(t.amount || 0) / max) * 100)}%`;
+      track.appendChild(fill);
+      const amt = document.createElement("div"); amt.className = "bar-amount"; amt.textContent = fmt(t.amount);
+      row.appendChild(name);
+      row.appendChild(track);
+      row.appendChild(amt);
+      sect.appendChild(row);
+    });
+    actionModalForm.appendChild(sect);
+  }
+
+  const states = Array.isArray(data.sales_by_state) ? data.sales_by_state : [];
+  if (states.length) {
+    const sect = document.createElement("div");
+    sect.className = "dashboard-section";
+    const h = document.createElement("h4");
+    h.textContent = "Ventas por estado (mes)";
+    sect.appendChild(h);
+    const stateMap = (s) => ({
+      draft: "Cotización borrador", sent: "Cotización enviada",
+      sale: "Venta confirmada", done: "Bloqueada/cerrada", cancel: "Cancelada",
+    }[String(s || "").toLowerCase()] || s);
+    const max = states.reduce((m, x) => Math.max(m, Number(x.amount || 0)), 0) || 1;
+    states.forEach((t) => {
+      const row = document.createElement("div");
+      row.className = "bar-row";
+      const name = document.createElement("div"); name.className = "bar-name"; name.textContent = `${stateMap(t.state)} (${t.count})`;
+      const track = document.createElement("div"); track.className = "bar-track";
+      const fill = document.createElement("div"); fill.className = "bar-fill";
+      fill.style.width = `${Math.max(2, (Number(t.amount || 0) / max) * 100)}%`;
+      track.appendChild(fill);
+      const amt = document.createElement("div"); amt.className = "bar-amount"; amt.textContent = fmt(t.amount);
+      row.appendChild(name);
+      row.appendChild(track);
+      row.appendChild(amt);
+      sect.appendChild(row);
+    });
+    actionModalForm.appendChild(sect);
+  }
+}
+
 function renderListResult(data) {
+  if (data.query === "dashboard_overview") {
+    renderDashboardResult(data);
+    return;
+  }
   actionModalTitle.textContent = data.title || "Lista";
   actionModalLead.textContent = `Total: ${Number(data.count || 0)} registros.`;
   actionModalForm.innerHTML = "";
@@ -809,7 +1089,7 @@ function renderListResult(data) {
   const box = document.createElement("div");
   box.className = "modal-plan-summary";
   if (!items.length) {
-    box.textContent =
+    const emptyMsg =
       data.query === "users_roles"
         ? "No se encontraron usuarios."
         : data.query === "accounting_recent_actions"
@@ -820,7 +1100,39 @@ function renderListResult(data) {
               ? "No se encontraron usuarios para revisar conexión."
               : data.query === "dirty_data_overview"
                 ? "No se detectaron datos sucios con estas reglas."
+                : data.query === "invoice_from_order_check"
+                  ? "No encontré facturas para esa orden."
+                  : data.query === "overdue_invoices"
+                    ? "No hay facturas vencidas."
+                    : data.query === "low_stock_products"
+                      ? "No hay productos bajo mínimo."
+                      : data.query === "best_vendor_for_product"
+                        ? "No hay proveedores configurados para ese producto."
+                        : data.query === "payroll_preview"
+                          ? "No hay datos para cálculo de nómina."
         : "No hay órdenes pendientes por entregar.";
+    const msg = document.createElement("div");
+    msg.textContent = data.hint || emptyMsg;
+    box.appendChild(msg);
+    if (
+      data.query === "invoice_from_order_check" &&
+      data.suggested_action &&
+      data.suggested_action.operation === "create"
+    ) {
+      const ctaWrap = document.createElement("div");
+      ctaWrap.style.marginTop = "12px";
+      const cta = document.createElement("button");
+      cta.type = "button";
+      cta.className = "btn primary";
+      cta.textContent = "Crear factura para esta orden";
+      cta.addEventListener("click", () => {
+        const draft = data.suggested_action;
+        closeActionModal();
+        openActionModal(draft);
+      });
+      ctaWrap.appendChild(cta);
+      box.appendChild(ctaWrap);
+    }
     actionModalForm.appendChild(box);
     return;
   }
@@ -842,6 +1154,21 @@ function renderListResult(data) {
   } else if (data.query === "dirty_data_overview") {
     thead.innerHTML =
       "<tr><th>Entidad</th><th>Registro</th><th>Problemas detectados</th></tr>";
+  } else if (data.query === "invoice_from_order_check") {
+    thead.innerHTML =
+      "<tr><th>Documento</th><th>Orden</th><th>Cliente</th><th>Estado</th><th class='num'>Total</th><th>Control duplicado</th></tr>";
+  } else if (data.query === "overdue_invoices") {
+    thead.innerHTML =
+      "<tr><th>Documento</th><th>Cliente</th><th>Vencimiento</th><th class='num'>Saldo</th><th>Estado de pago</th></tr>";
+  } else if (data.query === "low_stock_products") {
+    thead.innerHTML =
+      "<tr><th>Producto</th><th class='num'>Mínimo</th><th class='num'>Máximo</th><th class='num'>Sugerido</th><th>Acción</th></tr>";
+  } else if (data.query === "best_vendor_for_product") {
+    thead.innerHTML =
+      "<tr><th>Proveedor</th><th class='num'>Precio</th><th class='num'>Cant. mínima</th><th class='num'>Lead time (días)</th><th>Mejor opción</th></tr>";
+  } else if (data.query === "payroll_preview") {
+    thead.innerHTML =
+      "<tr><th>Empleado</th><th class='num'>Sueldo base</th><th class='num'>Horas extra</th><th class='num'>Bono</th><th class='num'>Pago extra</th><th class='num'>Total</th><th>Nota</th></tr>";
   } else {
     thead.innerHTML =
       "<tr><th>Pedido</th><th>Cliente</th><th>Fecha</th><th class='num'>Total</th><th>Entrega</th><th>Factura</th></tr>";
@@ -925,6 +1252,59 @@ function renderListResult(data) {
         <td>${it.issues || ""}</td>`;
       tbody.appendChild(tr);
     }
+  } else if (data.query === "invoice_from_order_check") {
+    for (const it of items) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>${it.document || ""}</td>
+        <td>${it.order_ref || ""}</td>
+        <td>${it.partner || ""}</td>
+        <td>${mapState(it.state)}</td>
+        <td class="num">${Number(it.amount_total || 0).toLocaleString()}</td>
+        <td>${it.duplicate_flag || ""}</td>`;
+      tbody.appendChild(tr);
+    }
+  } else if (data.query === "overdue_invoices") {
+    for (const it of items) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>${it.document || ""}</td>
+        <td>${it.partner || ""}</td>
+        <td>${it.due_date || ""}</td>
+        <td class="num">${Number(it.residual || 0).toLocaleString()}</td>
+        <td>${mapPaymentState(it.payment_state)}</td>`;
+      tbody.appendChild(tr);
+    }
+  } else if (data.query === "low_stock_products") {
+    for (const it of items) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>${it.product || ""}</td>
+        <td class="num">${Number(it.min_qty || 0).toLocaleString()}</td>
+        <td class="num">${Number(it.max_qty || 0).toLocaleString()}</td>
+        <td class="num">${Number(it.suggested_qty || 0).toLocaleString()}</td>
+        <td>${it.suggested_action || ""}</td>`;
+      tbody.appendChild(tr);
+    }
+  } else if (data.query === "best_vendor_for_product") {
+    for (const it of items) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>${it.vendor || ""}</td>
+        <td class="num">${Number(it.price || 0).toLocaleString()}</td>
+        <td class="num">${Number(it.min_qty || 0).toLocaleString()}</td>
+        <td class="num">${Number(it.lead_days || 0).toLocaleString()}</td>
+        <td>${it.best_option || ""}</td>`;
+      tbody.appendChild(tr);
+    }
+  } else if (data.query === "payroll_preview") {
+    for (const it of items) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>${it.employee || ""}</td>
+        <td class="num">${Number(it.base_salary || 0).toLocaleString()}</td>
+        <td class="num">${Number(it.hours_extra || 0).toLocaleString()}</td>
+        <td class="num">${Number(it.bonus || 0).toLocaleString()}</td>
+        <td class="num">${Number(it.extra_pay || 0).toLocaleString()}</td>
+        <td class="num">${Number(it.total || 0).toLocaleString()}</td>
+        <td>${it.message || ""}</td>`;
+      tbody.appendChild(tr);
+    }
   } else {
     for (const it of items) {
       const tr = document.createElement("tr");
@@ -954,6 +1334,35 @@ document.addEventListener("keydown", (e) => {
     e.preventDefault();
     closeActionModal();
   }
+});
+
+function applyModuleSelection(moduleId, label) {
+  document.querySelectorAll(".module-item").forEach((b) => b.classList.toggle("active", b.dataset.module === moduleId));
+  const crumb = document.getElementById("moduleCrumb");
+  if (crumb && label) crumb.textContent = label;
+}
+
+document.querySelectorAll(".module-item").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const moduleId = btn.dataset.module;
+    const prompt = btn.dataset.prompt || "";
+    applyModuleSelection(moduleId, btn.textContent.trim());
+    if (prompt) {
+      inputEl.value = prompt;
+      autoResizeComposer();
+      inputEl.focus();
+    }
+  });
+});
+
+document.querySelectorAll(".quick-prompt").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const p = btn.dataset.prompt || "";
+    if (!p) return;
+    inputEl.value = p;
+    autoResizeComposer();
+    inputEl.focus();
+  });
 });
 
 refreshHealth();
