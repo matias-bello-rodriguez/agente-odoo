@@ -1622,3 +1622,304 @@ document.querySelectorAll(".quick-prompt").forEach((btn) => {
 refreshHealth();
 resetComposerHeight();
 inputEl.focus();
+
+/* ================================================================== *
+ *  Extensiones v0.3 — alertas, reporte mensual, autocompletar copiloto
+ * ================================================================== */
+(function copilotExtensions() {
+  const alertsListEl = document.getElementById("alertsList");
+  const btnAlertsRefresh = document.getElementById("btnAlertsRefresh");
+  const btnReport = document.getElementById("btnReport");
+  const suggestionsEl = document.getElementById("suggestions");
+
+  const ALERT_PROMPT = {
+    low_stock: "Revisa productos bajo mínimo de stock",
+    overdue_invoices: "Muéstrame las facturas vencidas",
+    stale_drafts: "Muéstrame las facturas en borrador antiguas",
+  };
+
+  async function loadAlerts({ force = false } = {}) {
+    if (!alertsListEl) return;
+    alertsListEl.innerHTML = '<span class="hint subtle">Cargando…</span>';
+    try {
+      const url = force ? "/api/alerts/run" : "/api/alerts";
+      const opts = force
+        ? {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ use_cache: false }),
+          }
+        : {};
+      const res = await fetch(url, opts);
+      const data = await res.json();
+      if (!res.ok || !data?.alerts) {
+        alertsListEl.innerHTML =
+          '<span class="hint subtle">No se pudo cargar.</span>';
+        return;
+      }
+      renderAlerts(data.alerts);
+    } catch (err) {
+      alertsListEl.innerHTML = `<span class="hint subtle">${String(err)}</span>`;
+    }
+  }
+
+  function renderAlerts(alerts) {
+    alertsListEl.innerHTML = "";
+    if (!alerts.length) {
+      alertsListEl.innerHTML =
+        '<span class="hint subtle">Sin alertas configuradas.</span>';
+      return;
+    }
+    for (const a of alerts) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = `alert-item sev-${a.severity || "ok"}`;
+      btn.title = a.summary || a.title || "";
+      btn.innerHTML = `
+        <span class="alert-title">${escapeHtml(a.title || a.id)}</span>
+        <span class="alert-badge">${Number(a.count || 0)}</span>`;
+      btn.addEventListener("click", () => {
+        const prompt = ALERT_PROMPT[a.id];
+        if (!prompt) return;
+        inputEl.value = prompt;
+        if (typeof autoResizeComposer === "function") autoResizeComposer();
+        inputEl.focus();
+      });
+      alertsListEl.appendChild(btn);
+    }
+  }
+
+  if (btnAlertsRefresh) {
+    btnAlertsRefresh.addEventListener("click", () => loadAlerts({ force: true }));
+  }
+
+  if (btnReport) {
+    btnReport.addEventListener("click", async () => {
+      btnReport.disabled = true;
+      const originalLabel = btnReport.textContent;
+      btnReport.textContent = "Generando reporte…";
+      try {
+        const res = await fetch("/api/report/sales", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ write_summary: true }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          showToast(formatDetail(data?.detail) || "No se pudo generar el reporte.", true);
+          return;
+        }
+        renderReport(data);
+      } catch (err) {
+        showToast(String(err), true);
+      } finally {
+        btnReport.disabled = false;
+        btnReport.textContent = originalLabel;
+      }
+    });
+  }
+
+  function renderReport(payload) {
+    const totals = payload?.data?.totals || {};
+    const period = payload?.data?.period || {};
+    const top = payload?.data?.top_customers || [];
+    const lines = [];
+    lines.push(`Reporte de ventas (${period.label || "mes"})`);
+    lines.push(
+      `• Ventas: ${fmtMoney(totals.sales_amount)}  |  Mes anterior: ${fmtMoney(totals.previous_month_sales)}` +
+        (totals.growth_pct != null ? `  |  Crec.: ${totals.growth_pct.toFixed(2)}%` : ""),
+    );
+    lines.push(
+      `• Facturado: ${fmtMoney(totals.invoiced_amount)}  |  Órdenes confirmadas: ${totals.confirmed_orders ?? 0}`,
+    );
+    if (top.length) {
+      lines.push("• Top clientes:");
+      for (const c of top.slice(0, 5)) {
+        lines.push(`   - ${c.name}: ${fmtMoney(c.amount)}`);
+      }
+    }
+    if (payload?.summary) {
+      lines.push("\nAnálisis:");
+      lines.push(payload.summary);
+    }
+    appendAssistantMessage(lines.join("\n"));
+  }
+
+  function appendAssistantMessage(text) {
+    if (typeof appendMessage === "function") {
+      appendMessage("assistant", text);
+      return;
+    }
+    if (!messagesEl) return;
+    const el = document.createElement("div");
+    el.className = "msg assistant";
+    el.textContent = text;
+    messagesEl.appendChild(el);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+
+  function fmtMoney(value) {
+    const n = Number(value || 0);
+    if (!isFinite(n)) return "0";
+    return n.toLocaleString("es-CL", { maximumFractionDigits: 0 });
+  }
+
+  function escapeHtml(s) {
+    return String(s || "").replace(/[&<>"']/g, (c) => ({
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;",
+    }[c]));
+  }
+
+  /* ─────────── Autocompletar (modo copiloto) ─────────── */
+
+  const TRIGGER_PATTERNS = [
+    { kind: "partner", regex: /(?:cliente|para|a)\s+([A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9 ._-]{2,40})$/i },
+    { kind: "vendor", regex: /(?:proveedor|al proveedor)\s+([A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9 ._-]{2,40})$/i },
+    { kind: "product", regex: /(?:producto|item|artículo|articulo|sku)\s+([A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9 ._/-]{2,40})$/i },
+  ];
+
+  let activeIndex = -1;
+  let currentItems = [];
+  let currentMatch = null;
+  let lastQueryAbort = null;
+  let debounceTimer = null;
+
+  function detectTrigger(text) {
+    if (!text) return null;
+    for (const t of TRIGGER_PATTERNS) {
+      const m = text.match(t.regex);
+      if (m && m[1] && m[1].trim().length >= 2) {
+        return { kind: t.kind, query: m[1].trim(), matched: m[0] };
+      }
+    }
+    return null;
+  }
+
+  async function fetchSuggestions(kind, query) {
+    if (lastQueryAbort) lastQueryAbort.abort();
+    lastQueryAbort = new AbortController();
+    const url = `/api/suggest?kind=${encodeURIComponent(kind)}&q=${encodeURIComponent(query)}&limit=6`;
+    try {
+      const res = await fetch(url, { signal: lastQueryAbort.signal });
+      if (!res.ok) return [];
+      const data = await res.json();
+      return Array.isArray(data?.items) ? data.items : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function renderSuggestions(items, kind) {
+    if (!suggestionsEl) return;
+    if (!items.length) {
+      hideSuggestions();
+      return;
+    }
+    activeIndex = -1;
+    currentItems = items;
+    suggestionsEl.innerHTML = "";
+    const kindLabel = { partner: "Cliente", vendor: "Proveedor", product: "Producto" }[kind] || kind;
+    items.forEach((it, idx) => {
+      const node = document.createElement("div");
+      node.className = "suggestion";
+      node.setAttribute("role", "option");
+      node.dataset.index = String(idx);
+      node.innerHTML = `
+        <span class="sug-kind">${escapeHtml(kindLabel)}</span>
+        <span class="sug-title">${escapeHtml(it.label || "")}</span>
+        ${it.subtitle ? `<span class="sug-sub">${escapeHtml(it.subtitle)}</span>` : ""}`;
+      node.addEventListener("mousedown", (ev) => {
+        ev.preventDefault();
+        applySuggestion(idx);
+      });
+      suggestionsEl.appendChild(node);
+    });
+    suggestionsEl.hidden = false;
+  }
+
+  function hideSuggestions() {
+    if (!suggestionsEl) return;
+    suggestionsEl.hidden = true;
+    suggestionsEl.innerHTML = "";
+    activeIndex = -1;
+    currentItems = [];
+    currentMatch = null;
+  }
+
+  function applySuggestion(idx) {
+    if (!currentMatch || idx < 0 || idx >= currentItems.length) {
+      hideSuggestions();
+      return;
+    }
+    const choice = currentItems[idx];
+    const text = inputEl.value;
+    const start = text.length - currentMatch.matched.length;
+    if (start < 0) {
+      hideSuggestions();
+      return;
+    }
+    const prefix = text.slice(0, start);
+    // mantenemos el verbo original (e.g. "para") y reemplazamos sólo el nombre
+    const verbMatch = currentMatch.matched.match(/^(\S+)\s+/);
+    const verb = verbMatch ? verbMatch[1] + " " : "";
+    inputEl.value = prefix + verb + choice.label + " ";
+    if (typeof autoResizeComposer === "function") autoResizeComposer();
+    inputEl.focus();
+    hideSuggestions();
+  }
+
+  function highlightActive() {
+    if (!suggestionsEl) return;
+    const nodes = suggestionsEl.querySelectorAll(".suggestion");
+    nodes.forEach((n, i) => n.classList.toggle("active", i === activeIndex));
+  }
+
+  if (inputEl) {
+    inputEl.addEventListener("input", () => {
+      const text = inputEl.value;
+      const match = detectTrigger(text);
+      if (!match) {
+        hideSuggestions();
+        return;
+      }
+      currentMatch = match;
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(async () => {
+        const items = await fetchSuggestions(match.kind, match.query);
+        if (currentMatch === match) renderSuggestions(items, match.kind);
+      }, 180);
+    });
+
+    inputEl.addEventListener("keydown", (ev) => {
+      if (suggestionsEl?.hidden) return;
+      if (ev.key === "ArrowDown") {
+        ev.preventDefault();
+        activeIndex = Math.min(currentItems.length - 1, activeIndex + 1);
+        highlightActive();
+      } else if (ev.key === "ArrowUp") {
+        ev.preventDefault();
+        activeIndex = Math.max(0, activeIndex - 1);
+        highlightActive();
+      } else if (ev.key === "Enter" && activeIndex >= 0) {
+        ev.preventDefault();
+        applySuggestion(activeIndex);
+      } else if (ev.key === "Escape") {
+        hideSuggestions();
+      } else if (ev.key === "Tab" && currentItems.length) {
+        ev.preventDefault();
+        applySuggestion(activeIndex >= 0 ? activeIndex : 0);
+      }
+    });
+
+    inputEl.addEventListener("blur", () => {
+      setTimeout(hideSuggestions, 120);
+    });
+  }
+
+  // Carga inicial de alertas (sin bloquear si el backend tarda).
+  setTimeout(() => loadAlerts({ force: false }), 600);
+})();

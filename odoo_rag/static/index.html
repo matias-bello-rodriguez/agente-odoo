@@ -58,11 +58,26 @@
           </button>
         </div>
 
+        <div class="panel alerts-panel" id="alertsPanel">
+          <div class="alerts-head">
+            <span class="label">Alertas</span>
+            <button type="button" class="btn ghost btn-tiny" id="btnAlertsRefresh" title="Refrescar alertas">
+              ↻
+            </button>
+          </div>
+          <div class="alerts-list" id="alertsList">
+            <span class="hint subtle">Cargando…</span>
+          </div>
+        </div>
+
         <div class="panel actions">
           <label class="field">
             <span class="label">Chunks en contexto (top‑k)</span>
             <input type="number" id="topK" min="1" max="20" value="6" />
           </label>
+          <button type="button" class="btn secondary" id="btnReport">
+            Reporte de ventas del mes
+          </button>
           <button type="button" class="btn secondary" id="btnRebuild">
             Reindexar desde Odoo
           </button>
@@ -113,6 +128,7 @@
               autocomplete="off"
               spellcheck="true"
             ></textarea>
+            <div class="suggestions" id="suggestions" hidden role="listbox"></div>
             <div class="composer-toolbar">
               <div class="composer-toolbar-left">
                 <button

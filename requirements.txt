@@ -5,3 +5,6 @@ pydantic-settings>=2.2.1
 python-dotenv>=1.0.1
 fastapi>=0.115.0
 uvicorn[standard]>=0.32.0
+# Opcional: caché y memoria persistente.
+# Si no instalas redis, el sistema cae automáticamente a memoria local.
+redis>=5.0.0

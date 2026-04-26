@@ -1407,3 +1407,129 @@ body {
     border-radius: 18px;
   }
 }
+
+/* === Alertas (sidebar) ============================================== */
+.alerts-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.alerts-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.btn-tiny {
+  padding: 2px 8px;
+  font-size: 13px;
+  line-height: 1;
+  border-radius: 6px;
+}
+.alerts-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.alert-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--border-hairline);
+  background: var(--bg-elevated);
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text);
+  text-align: left;
+}
+.alert-item:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-muted);
+}
+.alert-item .alert-title {
+  font-weight: 500;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.alert-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  background: var(--bg-muted);
+  color: var(--text-secondary);
+}
+.alert-item.sev-warning {
+  border-color: rgba(240, 173, 78, 0.45);
+  background: var(--warning-muted);
+}
+.alert-item.sev-warning .alert-badge {
+  background: var(--warning);
+  color: #fff;
+}
+.alert-item.sev-error {
+  border-color: rgba(217, 83, 79, 0.45);
+  background: var(--danger-muted);
+}
+.alert-item.sev-error .alert-badge {
+  background: var(--danger);
+  color: #fff;
+}
+
+/* === Autocompletar (composer) ====================================== */
+.composer-panel {
+  position: relative;
+}
+.suggestions {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 12px;
+  right: 12px;
+  max-height: 240px;
+  overflow-y: auto;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  box-shadow: var(--shadow-float);
+  z-index: 50;
+  padding: 6px;
+}
+.suggestion {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 14px;
+}
+.suggestion:hover,
+.suggestion.active {
+  background: var(--accent-muted);
+}
+.suggestion .sug-title {
+  color: var(--text);
+  font-weight: 500;
+}
+.suggestion .sug-sub {
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+.suggestion .sug-kind {
+  align-self: flex-start;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
