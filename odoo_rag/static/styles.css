@@ -851,6 +851,14 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+.modal-table tr.list-row-link {
+  cursor: pointer;
+}
+
+.modal-table tr.list-row-link:hover td {
+  background: rgba(0, 160, 157, 0.12);
+}
+
 .modal-summary-row {
   display: grid;
   grid-template-columns: minmax(132px, 38%) 1fr;

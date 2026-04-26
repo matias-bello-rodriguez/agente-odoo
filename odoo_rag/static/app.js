@@ -18,6 +18,7 @@ const actionModalLead = document.getElementById("actionModalLead");
 const actionModalForm = document.getElementById("actionModalForm");
 const actionModalCancel = document.getElementById("actionModalCancel");
 const actionModalConfirm = document.getElementById("actionModalConfirm");
+let odooBaseUrl = "";
 
 /** Borrador vigente para el modal (solo referencia del modelo permitido por el servidor). */
 let pendingActionDraft = null;
@@ -183,6 +184,7 @@ async function refreshHealth() {
     const data = await r.json();
     healthPill.textContent = data.ok ? "En línea" : "Error";
     healthPill.classList.toggle("warn", !data.ok);
+    odooBaseUrl = String(data.odoo_url || "").replace(/\/+$/, "");
     odooTarget.textContent = `${data.odoo_url} · ${data.odoo_db}`;
     indexState.textContent = data.indexed ? "Listo" : "Sin índice";
     indexState.classList.toggle("dead", !data.indexed);
@@ -193,6 +195,46 @@ async function refreshHealth() {
     healthPill.textContent = "Sin conexión";
     healthPill.classList.add("warn");
   }
+}
+
+function odooRecordUrl(model, recordId) {
+  const id = Number(recordId || 0);
+  if (!model || !id) return "";
+  const base = odooBaseUrl || "";
+  if (!base) return "";
+  return `${base}/web#id=${id}&model=${encodeURIComponent(model)}&view_type=form`;
+}
+
+function modelForListQuery(query) {
+  if (query === "users_roles" || query === "users_last_login") return "res.users";
+  if (query === "accounting_recent_actions" || query === "accounting_missing_key_data") {
+    return "account.move";
+  }
+  if (query === "latest_product") return "product.product";
+  if (query === "customers_drop_with_active_contracts") return "res.partner";
+  if (query === "delivery_orders") return "sale.order";
+  return "";
+}
+
+function idFieldForListQuery(query) {
+  if (query === "customers_drop_with_active_contracts") return "partner_id";
+  return "id";
+}
+
+function attachListRowLinks({ query, items, tbody }) {
+  const model = modelForListQuery(query);
+  if (!model || !Array.isArray(items) || !tbody) return;
+  const idField = idFieldForListQuery(query);
+  const rows = Array.from(tbody.querySelectorAll("tr"));
+  rows.forEach((tr, idx) => {
+    const item = items[idx] || {};
+    const recId = Number(item[idField] || 0);
+    const url = odooRecordUrl(model, recId);
+    if (!url) return;
+    tr.classList.add("list-row-link");
+    tr.title = "Abrir registro en Odoo";
+    tr.addEventListener("click", () => window.open(url, "_blank", "noopener,noreferrer"));
+  });
 }
 
 function clearVoiceSilenceTimer() {
@@ -1156,8 +1198,14 @@ async function confirmActionInsert() {
       const params = {
         partner_name: vals.partner_name || draftParams.partner_name || draftParams.customer_name || "",
         product_name: vals.product_name || draftParams.product_name || "",
-        amount: vals.amount ? Number(vals.amount) : 0,
-        qty: vals.qty ? Number(vals.qty) : 1,
+        amount:
+          vals.amount && Number(vals.amount) > 0
+            ? Number(vals.amount)
+            : Number(draftParams.amount || draftParams.total || draftParams.amount_total || 0),
+        qty:
+          vals.qty && Number(vals.qty) > 0
+            ? Number(vals.qty)
+            : Number(draftParams.qty || 1),
       };
       const res = await fetch("/api/action/workflow", {
         method: "POST",
@@ -1171,8 +1219,32 @@ async function confirmActionInsert() {
         actionModalConfirm.disabled = false;
         return;
       }
-      renderWorkflowResult(data);
-      actionModalConfirm.disabled = false;
+      const steps = Array.isArray(data.steps) ? data.steps : [];
+      const lines = [];
+      lines.push(
+        data.ok
+          ? "Workflow ejecutado en Odoo correctamente."
+          : "Workflow ejecutado con incidencias. Revisa los pasos:"
+      );
+      for (const s of steps) {
+        lines.push(`- ${s.ok ? "OK" : "FALLÓ"} · ${s.step || "Paso"}: ${s.detail || ""}`);
+      }
+      const odooLinks = [];
+      if (data.partner_id) {
+        const u = odooRecordUrl("res.partner", data.partner_id);
+        if (u) odooLinks.push({ label: "Cliente en Odoo", url: u });
+      }
+      if (data.sale_order_id) {
+        const u = odooRecordUrl("sale.order", data.sale_order_id);
+        if (u) odooLinks.push({ label: "Orden de venta en Odoo", url: u });
+      }
+      if (data.invoice_id) {
+        const u = odooRecordUrl("account.move", data.invoice_id);
+        if (u) odooLinks.push({ label: "Factura en Odoo", url: u });
+      }
+      appendMessage("assistant", lines.join("\n"), { odoo_links: odooLinks });
+      showToast(data.ok ? "Workflow completado." : "Workflow completado con incidencias.");
+      closeActionModal();
       return;
     }
     if (pendingActionDraft.operation === "product_setup") {
@@ -1455,6 +1527,10 @@ function renderListResult(data) {
                               ? "No hay ventas para comparar en esos periodos."
                               : data.query === "customers_drop_with_active_contracts"
                                 ? "No hay clientes con caída >20% que cumplan los filtros."
+                              : data.query === "sales_last_month_total"
+                                ? "No hay ventas confirmadas para el último mes."
+                              : data.query === "issued_invoices_month_total"
+                                ? "No hay facturas emitidas en el mes actual."
         : "No hay órdenes pendientes por entregar.";
     const msg = document.createElement("div");
     msg.textContent = data.hint || emptyMsg;
@@ -1526,6 +1602,12 @@ function renderListResult(data) {
   } else if (data.query === "customers_drop_with_active_contracts") {
     thead.innerHTML =
       "<tr><th>Cliente</th><th class='num'>Mes -2</th><th class='num'>Mes -1</th><th class='num'>Caída %</th><th>Contrato activo</th><th>Incidencias facturación</th></tr>";
+  } else if (data.query === "sales_last_month_total") {
+    thead.innerHTML =
+      "<tr><th>Periodo</th><th class='num'>Total ventas</th></tr>";
+  } else if (data.query === "issued_invoices_month_total") {
+    thead.innerHTML =
+      "<tr><th>Periodo</th><th class='num'>Facturas emitidas</th><th class='num'>Suma total</th></tr>";
   } else {
     thead.innerHTML =
       "<tr><th>Pedido</th><th>Cliente</th><th>Fecha</th><th class='num'>Total</th><th>Entrega</th><th>Factura</th></tr>";
@@ -1732,6 +1814,21 @@ function renderListResult(data) {
         <td>${Number(it.billing_incidents || 0).toLocaleString()}</td>`;
       tbody.appendChild(tr);
     }
+  } else if (data.query === "sales_last_month_total") {
+    for (const it of items) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>${it.period || ""}</td>
+        <td class="num">${Number(it.sales_total || 0).toLocaleString()}</td>`;
+      tbody.appendChild(tr);
+    }
+  } else if (data.query === "issued_invoices_month_total") {
+    for (const it of items) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>${it.period || ""}</td>
+        <td class="num">${Number(it.invoices_count || 0).toLocaleString()}</td>
+        <td class="num">${Number(it.invoices_total || 0).toLocaleString()}</td>`;
+      tbody.appendChild(tr);
+    }
   } else {
     for (const it of items) {
       const tr = document.createElement("tr");
@@ -1745,6 +1842,7 @@ function renderListResult(data) {
     }
   }
   table.appendChild(tbody);
+  attachListRowLinks({ query: data.query, items, tbody });
   box.appendChild(table);
   actionModalForm.appendChild(box);
 }

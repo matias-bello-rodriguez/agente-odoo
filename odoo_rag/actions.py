@@ -110,6 +110,8 @@ _ALLOWED_LIST_QUERIES = frozenset(
         "sales_quarter_compare",
         "customers_drop_with_active_contracts",
         "demand_forecast_purchase_hints",
+        "sales_last_month_total",
+        "issued_invoices_month_total",
     }
 )
 _ALLOWED_EMAIL_TARGETS = frozenset({"partner", "invoice", "sale_order", "purchase_order"})
@@ -425,6 +427,44 @@ def structured_chat_reply(app: AppSettings, user_message: str, *, top_k: int) ->
                 "operation": "list",
                 "query": "dashboard_overview",
                 "summary": "Dashboard general",
+            },
+        }
+    if (
+        ("venta" in lowered_norm or "ventas" in lowered_norm)
+        and ("ultimo mes" in lowered_norm or "último mes" in lowered)
+        and (
+            "total" in lowered_norm
+            or "cuanto" in lowered_norm
+            or "cuánto" in lowered
+            or "monto" in lowered_norm
+        )
+    ):
+        return {
+            "reply": "Voy a calcular el total de ventas del último mes y te lo muestro en un modal.",
+            "draft_action": {
+                "operation": "list",
+                "query": "sales_last_month_total",
+                "summary": "Total ventas último mes",
+            },
+        }
+    if (
+        ("factura" in lowered_norm or "facturas" in lowered_norm)
+        and ("emitidas" in lowered_norm or "emitida" in lowered_norm or "publicadas" in lowered_norm)
+        and ("mes" in lowered_norm)
+        and (
+            "suma" in lowered_norm
+            or "total" in lowered_norm
+            or "sumalos" in lowered_norm
+            or "sumalos todos" in lowered_norm
+            or "sumalas" in lowered_norm
+        )
+    ):
+        return {
+            "reply": "Voy a calcular la suma de todas las facturas emitidas del mes y te lo muestro en un modal.",
+            "draft_action": {
+                "operation": "list",
+                "query": "issued_invoices_month_total",
+                "summary": "Suma facturas emitidas del mes",
             },
         }
     if (
@@ -845,6 +885,94 @@ def execute_list_query(app: AppSettings, query: str, params: dict[str, Any] | No
         raise ValueError(f"Consulta no permitida: {query}")
     p = params or {}
     client = OdooXmlRpc(app)
+    if query == "sales_last_month_total":
+        today = date.today()
+        first_day_this_month = date(today.year, today.month, 1)
+        last_day_prev_month = first_day_this_month - timedelta(days=1)
+        first_day_prev_month = date(last_day_prev_month.year, last_day_prev_month.month, 1)
+        try:
+            rows = client.execute_kw(
+                "sale.order",
+                "read_group",
+                [
+                    [
+                        ["state", "in", ["sale", "done"]],
+                        ["date_order", ">=", first_day_prev_month.isoformat()],
+                        ["date_order", "<=", last_day_prev_month.isoformat()],
+                    ],
+                    ["amount_total:sum"],
+                    [],
+                ],
+                {"lazy": False},
+            )
+        except xmlrpc.client.Fault as ex:
+            raise ValueError(_format_odoo_fault(ex)) from ex
+        total = float(rows[0].get("amount_total") if rows else 0.0) if rows else 0.0
+        return {
+            "query": "sales_last_month_total",
+            "title": "Total ventas del último mes",
+            "count": 1,
+            "items": [
+                {
+                    "period": f"{first_day_prev_month.isoformat()} a {last_day_prev_month.isoformat()}",
+                    "sales_total": round(total, 2),
+                }
+            ],
+            "meta": {
+                "period_start": first_day_prev_month.isoformat(),
+                "period_end": last_day_prev_month.isoformat(),
+            },
+            "hint": "",
+        }
+    if query == "issued_invoices_month_total":
+        today = date.today()
+        first_day_month = date(today.year, today.month, 1)
+        if today.month == 12:
+            next_month = date(today.year + 1, 1, 1)
+        else:
+            next_month = date(today.year, today.month + 1, 1)
+        last_day_month = next_month - timedelta(days=1)
+        try:
+            rows = client.execute_kw(
+                "account.move",
+                "read_group",
+                [
+                    [
+                        ["move_type", "=", "out_invoice"],
+                        ["state", "=", "posted"],
+                        ["invoice_date", ">=", first_day_month.isoformat()],
+                        ["invoice_date", "<=", last_day_month.isoformat()],
+                    ],
+                    ["amount_total:sum", "id:count"],
+                    [],
+                ],
+                {"lazy": False},
+            )
+        except xmlrpc.client.Fault as ex:
+            raise ValueError(_format_odoo_fault(ex)) from ex
+        amount_total = float(rows[0].get("amount_total") if rows else 0.0) if rows else 0.0
+        raw_count = (rows[0].get("id_count") if rows else None) or (rows[0].get("__count") if rows else 0) or 0
+        try:
+            invoices_count = int(raw_count)
+        except (TypeError, ValueError):
+            invoices_count = 0
+        return {
+            "query": "issued_invoices_month_total",
+            "title": "Suma de facturas emitidas del mes",
+            "count": 1,
+            "items": [
+                {
+                    "period": f"{first_day_month.isoformat()} a {last_day_month.isoformat()}",
+                    "invoices_count": invoices_count,
+                    "invoices_total": round(amount_total, 2),
+                }
+            ],
+            "meta": {
+                "period_start": first_day_month.isoformat(),
+                "period_end": last_day_month.isoformat(),
+            },
+            "hint": "",
+        }
     if query == "customers_drop_with_active_contracts":
         try:
             drop_threshold = float(p.get("drop_pct_threshold") or 20.0)
@@ -2366,20 +2494,40 @@ def execute_workflow(app: AppSettings, name: str, params: dict[str, Any]) -> dic
     ).strip()
     partner_name = re.sub(r"^\s*cliente\s+", "", partner_name, flags=re.IGNORECASE).strip()
     product_name = str(p.get("product_name") or "").strip()
-    try:
-        amount = float(p.get("amount") or 0.0)
-    except (TypeError, ValueError):
-        amount = 0.0
+    amount = 0.0
+    for amount_key in ("amount", "total", "amount_total", "price_unit", "price"):
+        try:
+            candidate = float(p.get(amount_key) or 0.0)
+        except (TypeError, ValueError):
+            candidate = 0.0
+        if candidate > 0:
+            amount = candidate
+            break
     try:
         qty = float(p.get("qty") or 1.0)
     except (TypeError, ValueError):
         qty = 1.0
     if not partner_name:
         raise ValueError("El workflow requiere el nombre del cliente.")
-    if amount <= 0:
-        raise ValueError("El workflow requiere un monto > 0.")
-
     steps: list[dict[str, Any]] = []
+    if qty <= 0:
+        qty = 1.0
+        steps.append(
+            {
+                "step": "Validación",
+                "ok": True,
+                "detail": "Cantidad no válida o vacía; se ajustó automáticamente a 1.",
+            }
+        )
+    if amount <= 0:
+        amount = 1.0
+        steps.append(
+            {
+                "step": "Validación",
+                "ok": True,
+                "detail": "Monto no informado o inválido; se usó monto mínimo 1. Ajusta la orden/factura luego si aplica.",
+            }
+        )
 
     try:
         partner_id = _find_partner_id_by_name(client, partner_name)
@@ -2406,14 +2554,47 @@ def execute_workflow(app: AppSettings, name: str, params: dict[str, Any]) -> dic
                 return {"workflow": name, "ok": False, "steps": steps}
         else:
             steps.append({"step": "Producto", "ok": True, "detail": f"Producto existente (id {product_id})", "ref": product_id})
+    if not product_id:
+        # Odoo 19 puede impedir confirmar la venta si la línea no tiene producto real.
+        # Usamos/creamos un producto de servicio técnico para que el flujo siempre avance.
+        fallback_name = "Servicio Workflow IA"
+        try:
+            product_id = _find_product_id_by_name(client, fallback_name)
+            steps.append(
+                {
+                    "step": "Producto",
+                    "ok": True,
+                    "detail": f"Producto fallback existente «{fallback_name}» (id {product_id})",
+                    "ref": product_id,
+                }
+            )
+        except ValueError:
+            try:
+                product_id = int(
+                    client.execute_kw(
+                        "product.product",
+                        "create",
+                        [{"name": fallback_name, "list_price": amount, "type": "service"}],
+                    )
+                )
+                steps.append(
+                    {
+                        "step": "Producto",
+                        "ok": True,
+                        "detail": f"Producto fallback creado «{fallback_name}» (id {product_id})",
+                        "ref": product_id,
+                    }
+                )
+            except xmlrpc.client.Fault as ex:
+                steps.append({"step": "Producto", "ok": False, "detail": _format_odoo_fault(ex)})
+                return {"workflow": name, "ok": False, "steps": steps}
 
     line_vals: dict[str, Any] = {
         "name": product_name or "Servicio",
         "product_uom_qty": qty,
         "price_unit": amount / max(qty, 1.0),
     }
-    if product_id:
-        line_vals["product_id"] = product_id
+    line_vals["product_id"] = product_id
     try:
         so_id = int(client.execute_kw(
             "sale.order", "create",
@@ -2450,22 +2631,7 @@ def execute_workflow(app: AppSettings, name: str, params: dict[str, Any]) -> dic
             )
             if inv_rows:
                 invoice_id = int(inv_rows[0]["id"])
-        # 2) Intento con método público clásico (si existe en la versión).
-        if not invoice_id:
-            try:
-                client.execute_kw("sale.order", "action_create_invoice", [[so_id]])
-            except xmlrpc.client.Fault:
-                pass
-            if so_name:
-                inv_rows = client.execute_kw(
-                    "account.move",
-                    "search_read",
-                    [[["invoice_origin", "=", so_name]]],
-                    {"fields": ["id"], "limit": 1, "order": "id desc"},
-                )
-                if inv_rows:
-                    invoice_id = int(inv_rows[0]["id"])
-        # 3) Fallback compatible por XML-RPC: crear account.move manual.
+        # 2) Fallback compatible por XML-RPC/Odoo 19: crear account.move manual.
         if not invoice_id:
             line_price = amount / max(qty, 1.0)
             inv_payload: dict[str, Any] = {

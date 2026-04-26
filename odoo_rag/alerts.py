@@ -52,7 +52,9 @@ def check_low_stock(app: AppSettings, *, client: OdooXmlRpc | None = None) -> di
         [["active", "=", True], ["type", "=", "consu"]],
         ["id", "name", "default_code", "qty_available", "list_price"],
         limit=400,
-        order="qty_available asc, name asc",
+        # Odoo 19 no permite ORDER BY en campos no almacenados como qty_available.
+        # Ordenamos luego en Python para evitar "Cannot convert ... to SQL".
+        order="id desc",
     )
     items: list[dict[str, Any]] = []
     for r in rows:
