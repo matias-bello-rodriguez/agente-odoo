@@ -20,6 +20,7 @@ from odoo_rag.actions import (
     execute_workflow,
     structured_chat_reply,
 )
+from odoo_rag.erp_bridge import execute_erp_action
 from odoo_rag.odoo_urls import odoo_links_after_create, odoo_links_after_product_setup
 from odoo_rag.product_setup import run_product_setup
 from odoo_rag.config import load_settings
@@ -73,6 +74,11 @@ class ActionWorkflowBody(BaseModel):
     operation: str = Field(default="workflow", max_length=20)
     name: str = Field(..., min_length=1, max_length=80)
     params: dict = Field(default_factory=dict)
+
+
+class ErpActionBody(BaseModel):
+    kind: str = Field(..., min_length=1, max_length=16)
+    spec: dict = Field(default_factory=dict)
 
 
 @app.get("/api/health")
@@ -210,6 +216,22 @@ async def api_action_email(body: ActionEmailBody) -> dict:
 
     def run() -> dict:
         return execute_email_action(settings, body.target, body.params)
+
+    try:
+        result = await asyncio.to_thread(run)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(e)) from e
+    return {"ok": True, **result}
+
+
+@app.post("/api/action/erp")
+async def api_action_erp(body: ErpActionBody) -> dict:
+    settings = load_settings()
+
+    def run() -> dict:
+        return execute_erp_action(settings, body.kind, body.spec)
 
     try:
         result = await asyncio.to_thread(run)

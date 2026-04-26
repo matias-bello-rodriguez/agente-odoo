@@ -710,6 +710,27 @@ body {
   border: 1px solid var(--border-hairline);
 }
 
+.modal-erp-json {
+  margin: 0.5rem 0 0;
+  font-size: 0.75rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 42vh;
+  overflow: auto;
+}
+
+.modal-erp-warn {
+  color: #a32020;
+  font-weight: 600;
+  margin: 0 0 0.5rem;
+}
+
+.modal-erp-hint {
+  margin: 0 0 0.65rem;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+
 .modal-table {
   width: 100%;
   border-collapse: collapse;
@@ -1214,4 +1235,175 @@ body {
   border: none;
   border-top: 1px solid var(--border-hairline);
   margin: 0.5rem 1.4rem;
+}
+
+/* ===== iPhone polish override ===== */
+:root {
+  --ios-blue: #0a84ff;
+  --ios-gray-0: #f5f5f7;
+  --ios-gray-1: #ffffff;
+  --ios-gray-2: #f2f2f7;
+  --ios-gray-3: #e5e5ea;
+}
+
+body {
+  background:
+    radial-gradient(1200px 520px at 88% -10%, rgba(10, 132, 255, 0.16), transparent 62%),
+    radial-gradient(900px 500px at 12% -15%, rgba(94, 92, 230, 0.1), transparent 60%),
+    linear-gradient(180deg, #f7f8fb 0%, #f2f3f8 100%);
+}
+
+.layout {
+  max-width: 1520px;
+  margin: 0 auto;
+  min-height: 100vh;
+}
+
+.sidebar {
+  background: rgba(255, 255, 255, 0.72);
+  border-right: 1px solid rgba(60, 60, 67, 0.15);
+  backdrop-filter: saturate(170%) blur(22px);
+  -webkit-backdrop-filter: saturate(170%) blur(22px);
+}
+
+.panel {
+  border-radius: 14px;
+  border-color: rgba(60, 60, 67, 0.12);
+  background: rgba(255, 255, 255, 0.92);
+}
+
+.chat-shell {
+  background: transparent;
+}
+
+.chat-header {
+  background: rgba(255, 255, 255, 0.58);
+  border-bottom-color: rgba(60, 60, 67, 0.14);
+  backdrop-filter: saturate(170%) blur(24px);
+  -webkit-backdrop-filter: saturate(170%) blur(24px);
+}
+
+.messages {
+  gap: 0.82rem;
+  padding-top: 1.45rem;
+}
+
+.msg {
+  max-width: min(650px, 90%);
+  border-radius: 19px;
+  padding: 0.72rem 1rem;
+}
+
+.msg.user {
+  background: linear-gradient(180deg, #2d9bff 0%, var(--ios-blue) 100%);
+  border-bottom-right-radius: 8px;
+  box-shadow: 0 10px 24px rgba(10, 132, 255, 0.28);
+}
+
+.msg.assistant {
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid rgba(60, 60, 67, 0.14);
+  border-bottom-left-radius: 8px;
+  box-shadow: 0 8px 20px rgba(17, 20, 38, 0.08);
+}
+
+.quick-prompts {
+  gap: 0.48rem;
+}
+
+.quick-prompt {
+  background: rgba(255, 255, 255, 0.82);
+  border: 1px solid rgba(60, 60, 67, 0.16);
+  box-shadow: 0 1px 4px rgba(17, 20, 38, 0.06);
+  font-weight: 520;
+}
+
+.quick-prompt:hover {
+  background: rgba(10, 132, 255, 0.12);
+  border-color: rgba(10, 132, 255, 0.34);
+  color: var(--ios-blue);
+}
+
+.composer {
+  background: rgba(255, 255, 255, 0.58);
+  border-top-color: rgba(60, 60, 67, 0.14);
+}
+
+.composer-panel {
+  max-width: 860px;
+  border-radius: 22px;
+  border-color: rgba(60, 60, 67, 0.14);
+  background: rgba(255, 255, 255, 0.9);
+  box-shadow:
+    0 16px 36px rgba(18, 22, 41, 0.12),
+    0 2px 10px rgba(18, 22, 41, 0.08);
+}
+
+.composer-panel:focus-within {
+  border-color: rgba(10, 132, 255, 0.48);
+  box-shadow:
+    0 16px 36px rgba(18, 22, 41, 0.12),
+    0 2px 10px rgba(18, 22, 41, 0.08),
+    0 0 0 4px rgba(10, 132, 255, 0.14);
+}
+
+.btn {
+  font-size: 0.84rem;
+  padding: 0.56rem 1.05rem;
+}
+
+.btn.primary {
+  background: linear-gradient(180deg, #2d9bff 0%, var(--ios-blue) 100%);
+  box-shadow: 0 7px 18px rgba(10, 132, 255, 0.32);
+}
+
+.btn.ghost {
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.btn.mic {
+  background: rgba(242, 242, 247, 0.92);
+  border-color: rgba(60, 60, 67, 0.12);
+}
+
+.module-item {
+  border-radius: 11px;
+  font-weight: 560;
+}
+
+.module-item.active {
+  background: linear-gradient(180deg, rgba(10, 132, 255, 0.17) 0%, rgba(10, 132, 255, 0.12) 100%);
+  border-color: rgba(10, 132, 255, 0.32);
+  color: #005fcb;
+}
+
+.modal-overlay {
+  background: rgba(20, 24, 38, 0.28);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+.modal-card {
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.95);
+  border-color: rgba(60, 60, 67, 0.16);
+}
+
+.modal-head {
+  background: rgba(255, 255, 255, 0.72);
+}
+
+@media (max-width: 980px) {
+  .layout {
+    max-width: none;
+  }
+  .sidebar {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    background: #fff;
+  }
+  .composer-panel {
+    max-width: 100%;
+    border-radius: 18px;
+  }
 }

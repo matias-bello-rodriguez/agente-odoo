@@ -6,13 +6,14 @@ import json
 import re
 import unicodedata
 import xmlrpc.client
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 from openai import OpenAI
 
 from odoo_rag.config import Settings as AppSettings
 from odoo_rag.odoo_client import OdooXmlRpc
+from odoo_rag.erp_bridge import sanitize_erp_draft_action
 from odoo_rag.product_setup import (
     DEFAULT_PRODUCT_SETUP_REPLY,
     extract_product_setup_draft,
@@ -105,6 +106,10 @@ _ALLOWED_LIST_QUERIES = frozenset(
         "best_vendor_for_product",
         "payroll_preview",
         "dashboard_overview",
+        "latest_product",
+        "sales_quarter_compare",
+        "customers_drop_with_active_contracts",
+        "demand_forecast_purchase_hints",
     }
 )
 _ALLOWED_EMAIL_TARGETS = frozenset({"partner", "invoice", "sale_order", "purchase_order"})
@@ -269,6 +274,9 @@ def sanitize_draft_action(raw: dict[str, Any] | None) -> dict[str, Any] | None:
             "params": params,
             "summary": str(summary)[:240],
         }
+    if raw.get("operation") == "erp":
+        erp = sanitize_erp_draft_action(raw)
+        return erp
     if raw.get("operation") != "create":
         return None
     model = raw.get("model")
@@ -306,6 +314,38 @@ Si dice "empresa", "sociedad", "SA", "S.L." o similar para un contacto → model
 ## Cuándo draft_action debe ser null
 - Solo consultas: listar, buscar, cuántos, resume, qué clientes… sin pedir alta.
 - El usuario pide crear pero **no da ningún dato** (ni nombre): reply pidiendo nombre/email mínimos; draft_action null.
+
+## operation "list" (tablas y análisis en modal)
+Si el usuario pide **proyección o modelo predictivo de demanda**, **pronóstico** de ventas a futuro o **sugerencias de compras** en sentido analítico (no dice explícitamente «crear orden de compra» ni da proveedor), respondé con draft_action:
+`{"operation":"list","query":"demand_forecast_purchase_hints","params":{"horizon_months":3},"summary":"Demanda y compras"}`
+Ajustá `horizon_months` (1–12) si indica otro horizonte (ej. 6 meses → 6). **No** confundas «generar un modelo» o «generar un pronóstico» con alta de `purchase.order`.
+
+## operation "erp" (consultar, actualizar, archivar o borrar en Odoo)
+Usá `draft_action` con **operation** `"erp"`, **kind** en `read` | `write` | `archive` | `unlink`, **model** y el resto según kind. La app valida todo contra listas blancas; dominios solo AND de tripletas `[campo, operador, valor]`.
+
+### kind "read" (consulta / listado)
+Modelos permitidos: `res.partner`, `product.product`, `sale.order`, `purchase.order`, `account.move`, `stock.picking`.
+Incluí `domain` (array de tripletas), `fields` (array de nombres de campo permitidos para ese modelo), `limit` (número, máx. según modelo).
+Operadores de dominio permitidos: `=`, `!=`, `>`, `<`, `>=`, `<=`, `ilike`, `like`, `in`, `not in`.
+Ejemplo: listar clientes activos con email gmail:
+`{"operation":"erp","kind":"read","model":"res.partner","domain":[["active","=",true],["email","ilike","gmail"]],"fields":["id","name","email","city"],"limit":40,"summary":"Buscar clientes"}`
+
+### kind "write" (actualizar)
+Solo campos permitidos por modelo. `account.move`: solo `ref` y `narration` y **solo si la factura está en borrador** (la app lo verifica).
+`res.partner`: name, email, phone, street, city, zip, vat, comment, is_company, active.
+`product.product`: name, default_code, list_price, standard_price, type, active, barcode.
+`sale.order`: note, client_order_ref. `purchase.order`: notes, partner_ref.
+Ejemplo: `{"operation":"erp","kind":"write","model":"res.partner","record_id":12,"values":{"phone":"+56 9 0000 0000"},"summary":"Actualizar teléfono"}`
+
+### kind "archive" (desactivar / “borrar” suave)
+Modelos: `res.partner`, `product.product`. `record_ids` array de enteros (máx. 8). Equivale a `active: false`.
+Ejemplo: `{"operation":"erp","kind":"archive","model":"product.product","record_ids":[101],"summary":"Archivar producto"}`
+
+### kind "unlink" (borrado físico, muy restringido)
+Solo `product.product`, máximo **2** ids en `record_ids`. Usalo solo si el usuario pide explícitamente eliminar producto y entendés el riesgo.
+Ejemplo: `{"operation":"erp","kind":"unlink","model":"product.product","record_ids":[55],"summary":"Eliminar producto"}`
+
+Para **altas nuevas** seguí usando operation `"create"` con `values` como hasta ahora.
 
 ## PROHIBIDO en "reply" cuando envías draft_action
 No escribas frases como: "debes seguir el procedimiento en Odoo", "completa el registro en el sistema", "utiliza el menú Contactos", "asegúrate de crear manualmente". La app abrirá un formulario de confirmación; tu reply debe ser **breve** (1–3 frases): confirmas que preparaste los datos para revisión y que puede confirmar en el modal.
@@ -366,6 +406,11 @@ def structured_chat_reply(app: AppSettings, user_message: str, *, top_k: int) ->
     lowered = user_message.lower()
     lowered_norm = unicodedata.normalize("NFKD", lowered)
     lowered_norm = "".join(ch for ch in lowered_norm if not unicodedata.combining(ch))
+    invoice_word_like = bool(
+        "factur" in lowered_norm
+        or "fatctur" in lowered_norm
+        or re.search(r"f[a-z]{0,2}ctur", lowered_norm)
+    )
     if (
         "dashboard" in lowered
         or "panel" in lowered
@@ -380,6 +425,40 @@ def structured_chat_reply(app: AppSettings, user_message: str, *, top_k: int) ->
                 "operation": "list",
                 "query": "dashboard_overview",
                 "summary": "Dashboard general",
+            },
+        }
+    if (
+        ("ventas" in lowered_norm or "venta" in lowered_norm)
+        and ("ultimo trimestre" in lowered_norm or "ultim trimestre" in lowered_norm or "trimestre" in lowered_norm)
+        and ("ano pasado" in lowered_norm or "año pasado" in lowered or "mismo periodo" in lowered_norm)
+        and ("region" in lowered_norm or "región" in lowered)
+        and ("canal" in lowered_norm)
+        and ("margen" in lowered_norm or "margen neto" in lowered_norm)
+    ):
+        return {
+            "reply": "Preparé la comparación trimestral de ventas vs año pasado por región y canal, con margen neto estimado incluyendo logística variable.",
+            "draft_action": {
+                "operation": "list",
+                "query": "sales_quarter_compare",
+                "params": {"logistic_rate": 0.08},
+                "summary": "Ventas trimestre vs año pasado",
+            },
+        }
+    if (
+        ("cliente" in lowered_norm or "clientes" in lowered_norm)
+        and ("caido" in lowered_norm or "caida" in lowered_norm or "bajado" in lowered_norm or "disminuido" in lowered_norm)
+        and ("20%" in lowered_norm or "20 %" in lowered_norm or "veinte" in lowered_norm)
+        and ("mes a mes" in lowered_norm or "mensual" in lowered_norm)
+        and ("contrato" in lowered_norm or "contratos" in lowered_norm)
+        and ("incidencia" in lowered_norm or "incidencias" in lowered_norm or "facturacion" in lowered_norm)
+    ):
+        return {
+            "reply": "Preparé el análisis de clientes con caída mensual mayor al 20%, filtrando por contrato activo y sin incidencias de facturación.",
+            "draft_action": {
+                "operation": "list",
+                "query": "customers_drop_with_active_contracts",
+                "params": {"drop_pct_threshold": 20.0},
+                "summary": "Clientes con caída >20% (contrato activo, sin incidencias)",
             },
         }
     if (
@@ -457,6 +536,24 @@ def structured_chat_reply(app: AppSettings, user_message: str, *, top_k: int) ->
                 "summary": "Órdenes por entregar",
             },
         }
+    m_order_code = re.search(r"\bS\d{3,}\b", user_message, re.IGNORECASE)
+    if m_order_code and (
+        "ver" in lowered_norm
+        or "mostrar" in lowered_norm
+        or "muestrame" in lowered_norm
+        or "esta" in lowered_norm
+        or "orden" in lowered_norm
+    ):
+        order_code = m_order_code.group(0).upper()
+        return {
+            "reply": f"Voy a mostrarte la orden {order_code}. Abro el modal con su detalle.",
+            "draft_action": {
+                "operation": "list",
+                "query": "delivery_orders",
+                "params": {"order_ref": order_code},
+                "summary": f"Orden {order_code}",
+            },
+        }
     if (
         ("usuario" in lowered or "usuarios" in lowered)
         and ("rol" in lowered or "roles" in lowered or "grupos" in lowered)
@@ -468,6 +565,33 @@ def structured_chat_reply(app: AppSettings, user_message: str, *, top_k: int) ->
                 "operation": "list",
                 "query": "users_roles",
                 "summary": "Usuarios y roles",
+            },
+        }
+    if (
+        ("ultima" in lowered_norm or "última" in lowered or "reciente" in lowered_norm)
+        and invoice_word_like
+        and ("mostrar" in lowered_norm or "muestrame" in lowered_norm or "ver" in lowered_norm or "dame" in lowered_norm)
+    ):
+        return {
+            "reply": "Voy a mostrarte la última factura en un modal.",
+            "draft_action": {
+                "operation": "list",
+                "query": "accounting_recent_actions",
+                "params": {"latest_only": True},
+                "summary": "Última factura",
+            },
+        }
+    if (
+        ("ultimo" in lowered_norm or "ultima" in lowered_norm or "reciente" in lowered_norm)
+        and ("producto" in lowered_norm or "articulo" in lowered_norm or "item" in lowered_norm or "ítem" in lowered)
+        and ("ingresado" in lowered_norm or "creado" in lowered_norm or "registrado" in lowered_norm or "alta" in lowered_norm)
+    ):
+        return {
+            "reply": "Voy a mostrarte el último producto ingresado en un modal.",
+            "draft_action": {
+                "operation": "list",
+                "query": "latest_product",
+                "summary": "Último producto ingresado",
             },
         }
     if (
@@ -551,14 +675,55 @@ def structured_chat_reply(app: AppSettings, user_message: str, *, top_k: int) ->
                 "summary": "Bajo stock y reposición",
             },
         }
-    if ("sin proveedor" in lowered) or (
-        ("orden" in lowered or "compra" in lowered) and "proveedor" not in lowered and ("crear" in lowered or "crea" in lowered or "genera" in lowered)
+    if (
+        re.search(r"\b(demanda|predictivo|pronostico|forecast|proyeccion|modelo\s+predictivo)\b", lowered_norm)
+        and re.search(r"\b(compra|compras|abastecimiento|reposicion|proveedor)\b", lowered_norm)
+    ) or (
+        re.search(r"\b(demanda|predictivo|pronostico)\b", lowered_norm)
+        and re.search(r"\bmes(es)?\b", lowered_norm)
+    ):
+        hm = 3
+        if re.search(r"\btres\s+mes", lowered_norm):
+            hm = 3
+        elif (m_hm := re.search(r"\b(\d{1,2})\s*mes", lowered_norm)):
+            try:
+                hm = max(1, min(12, int(m_hm.group(1))))
+            except ValueError:
+                hm = 3
+        return {
+            "reply": "Preparé una vista con proyección simple de demanda (próximos meses) y sugerencias de ajuste en compras según ventas recientes y reposición.",
+            "draft_action": {
+                "operation": "list",
+                "query": "demand_forecast_purchase_hints",
+                "params": {"horizon_months": hm},
+                "summary": "Demanda predictiva y compras",
+            },
+        }
+    _analytics_context = bool(
+        re.search(
+            r"\b(modelo|predictivo|pronostico|forecast|demanda|machine\s+learning|\bml\b|estadistico|analisis|insight|reporte|grafico|dashboard)\b",
+            lowered_norm,
+        )
+    )
+    if ("sin proveedor" in lowered_norm) or (
+        not _analytics_context
+        and ("crear" in lowered_norm or "crea" in lowered_norm or "genera" in lowered_norm)
+        and "proveedor" not in lowered_norm
+        and (
+            re.search(r"\borden\s+de\s+compra\b", lowered_norm)
+            or re.search(r"\bpurchase\s+order\b", lowered_norm)
+            or (re.search(r"\borden\b", lowered_norm) and re.search(r"\bcompras?\b", lowered_norm))
+        )
     ):
         return {
             "reply": "Falta el proveedor para crear la orden. Indica proveedor, producto, cantidad y precio si lo tienes; con eso preparo el formulario.",
             "draft_action": None,
         }
-    if ("compra" in lowered or "comprar" in lowered) and ("proveedor" in lowered) and ("barato" in lowered or "más barato" in lowered or "mas barato" in lowered):
+    if (
+        "proveedor" in lowered_norm
+        and ("barato" in lowered_norm or "mas barato" in lowered_norm or "mejor precio" in lowered_norm)
+        and ("producto" in lowered_norm or "item" in lowered_norm or "articulo" in lowered_norm)
+    ):
         m_qty = re.search(r"(\d+(?:[.,]\d+)?)\s*(?:unidades|unidad|u)\b", lowered)
         qty = float(m_qty.group(1).replace(",", ".")) if m_qty else 1.0
         m_prod = re.search(r"(?:producto)\s+([A-Za-z0-9 _\-/]+?)(?:\s+al proveedor|\s*$)", user_message, re.IGNORECASE)
@@ -626,7 +791,8 @@ def structured_chat_reply(app: AppSettings, user_message: str, *, top_k: int) ->
         "Mensaje del usuario:\n"
         f"{user_message.strip()}\n\n"
         "Si el mensaje pide registrar o crear registros de ventas, compras, inventario, facturas o maestros con datos concretos en el mismo texto, "
-        "debés incluir draft_action con operation create y values rellenados (no solo explicar pasos)."
+        "debés incluir draft_action con operation create y values rellenados (no solo explicar pasos). "
+        "Si pide buscar, listar, actualizar, archivar o borrar datos ya existentes en Odoo, usá draft_action con operation erp y kind read|write|archive|unlink según corresponda (ver reglas del sistema)."
     )
     completion = client.chat.completions.create(
         model=app.openai_llm_model,
@@ -679,6 +845,299 @@ def execute_list_query(app: AppSettings, query: str, params: dict[str, Any] | No
         raise ValueError(f"Consulta no permitida: {query}")
     p = params or {}
     client = OdooXmlRpc(app)
+    if query == "customers_drop_with_active_contracts":
+        try:
+            drop_threshold = float(p.get("drop_pct_threshold") or 20.0)
+        except (TypeError, ValueError):
+            drop_threshold = 20.0
+        if drop_threshold < 1:
+            drop_threshold = 1.0
+        if drop_threshold > 95:
+            drop_threshold = 95.0
+
+        today = date.today()
+        first_day_this_month = date(today.year, today.month, 1)
+        last_day_prev_month = first_day_this_month - timedelta(days=1)
+        first_day_prev_month = date(last_day_prev_month.year, last_day_prev_month.month, 1)
+        last_day_prev2_month = first_day_prev_month - timedelta(days=1)
+        first_day_prev2_month = date(last_day_prev2_month.year, last_day_prev2_month.month, 1)
+
+        try:
+            sales_rows = client.execute_kw(
+                "sale.order",
+                "search_read",
+                [[
+                    ["state", "in", ["sale", "done"]],
+                    ["date_order", ">=", first_day_prev2_month.isoformat()],
+                    ["date_order", "<=", last_day_prev_month.isoformat()],
+                ]],
+                {
+                    "fields": ["id", "partner_id", "date_order", "amount_total"],
+                    "limit": 5000,
+                    "order": "date_order desc, id desc",
+                },
+            )
+        except xmlrpc.client.Fault as ex:
+            raise ValueError(_format_odoo_fault(ex)) from ex
+
+        by_partner: dict[int, dict[str, float]] = {}
+        for row in sales_rows:
+            partner = row.get("partner_id")
+            if not (isinstance(partner, (list, tuple)) and partner):
+                continue
+            pid = int(partner[0])
+            dt = str(row.get("date_order") or "")[:10]
+            amount = float(row.get("amount_total") or 0.0)
+            if pid not in by_partner:
+                by_partner[pid] = {"prev_month": 0.0, "prev2_month": 0.0}
+            if first_day_prev_month.isoformat() <= dt <= last_day_prev_month.isoformat():
+                by_partner[pid]["prev_month"] += amount
+            elif first_day_prev2_month.isoformat() <= dt <= last_day_prev2_month.isoformat():
+                by_partner[pid]["prev2_month"] += amount
+
+        # Contratos activos: intenta usar sale.subscription si existe.
+        active_contract_partner_ids: set[int] = set()
+        try:
+            sub_rows = client.execute_kw(
+                "sale.subscription",
+                "search_read",
+                [[["partner_id", "!=", False]]],
+                {"fields": ["partner_id", "stage_category"], "limit": 5000},
+            )
+            for sr in sub_rows:
+                partner = sr.get("partner_id")
+                stage = str(sr.get("stage_category") or "").lower()
+                if isinstance(partner, (list, tuple)) and partner and stage not in {"closed", "cancel"}:
+                    active_contract_partner_ids.add(int(partner[0]))
+        except xmlrpc.client.Fault:
+            # Si no hay módulo contratos, se intenta campo contractual en partner.
+            try:
+                partner_rows = client.execute_kw(
+                    "res.partner",
+                    "search_read",
+                    [[["id", "in", sorted(by_partner.keys())]]],
+                    {"fields": ["id", "is_company", "active"], "limit": len(by_partner) + 10},
+                )
+                for pr in partner_rows:
+                    if bool(pr.get("active")):
+                        active_contract_partner_ids.add(int(pr.get("id") or 0))
+            except xmlrpc.client.Fault:
+                active_contract_partner_ids = set()
+
+        candidate_ids = [pid for pid, vals in by_partner.items() if vals["prev2_month"] > 0 and pid in active_contract_partner_ids]
+
+        items: list[dict[str, Any]] = []
+        for pid in candidate_ids:
+            prev2 = by_partner[pid]["prev2_month"]
+            prev1 = by_partner[pid]["prev_month"]
+            drop_pct = ((prev2 - prev1) / prev2) * 100.0 if prev2 else 0.0
+            if drop_pct <= drop_threshold:
+                continue
+
+            # Incidencias facturación: vencidas/no pagadas o canceladas en últimos 6 meses.
+            six_months_ago = (today - timedelta(days=180)).isoformat()
+            try:
+                incidents_count = int(
+                    client.execute_kw(
+                        "account.move",
+                        "search_count",
+                        [[
+                            ["partner_id", "=", pid],
+                            ["move_type", "in", ["out_invoice", "in_invoice"]],
+                            ["invoice_date", ">=", six_months_ago],
+                            "|",
+                            ["payment_state", "in", ["not_paid", "partial"]],
+                            ["state", "=", "cancel"],
+                        ]],
+                    )
+                )
+            except xmlrpc.client.Fault:
+                incidents_count = 0
+            if incidents_count > 0:
+                continue
+
+            try:
+                partner_row = client.execute_kw(
+                    "res.partner",
+                    "read",
+                    [[pid]],
+                    {"fields": ["name"]},
+                )
+                partner_name = str(partner_row[0].get("name") or "") if partner_row else f"Partner {pid}"
+            except xmlrpc.client.Fault:
+                partner_name = f"Partner {pid}"
+
+            items.append(
+                {
+                    "partner_id": pid,
+                    "customer": partner_name,
+                    "month_prev2_sales": round(prev2, 2),
+                    "month_prev1_sales": round(prev1, 2),
+                    "drop_pct": round(drop_pct, 2),
+                    "has_active_contract": True,
+                    "billing_incidents": incidents_count,
+                }
+            )
+
+        items.sort(key=lambda x: -x["drop_pct"])
+        return {
+            "query": "customers_drop_with_active_contracts",
+            "title": "Clientes con caída >20% (contrato activo, sin incidencias)",
+            "count": len(items),
+            "items": items,
+            "meta": {
+                "month_prev2": f"{first_day_prev2_month.isoformat()} a {last_day_prev2_month.isoformat()}",
+                "month_prev1": f"{first_day_prev_month.isoformat()} a {last_day_prev_month.isoformat()}",
+                "drop_threshold_pct": drop_threshold,
+            },
+            "hint": "No encontré clientes que cumplan la condición solicitada." if not items else "",
+        }
+    if query == "sales_quarter_compare":
+        try:
+            logistic_rate = float(p.get("logistic_rate") or 0.08)
+        except (TypeError, ValueError):
+            logistic_rate = 0.08
+        if logistic_rate < 0:
+            logistic_rate = 0.0
+        if logistic_rate > 0.6:
+            logistic_rate = 0.6
+
+        today = date.today()
+        q = ((today.month - 1) // 3) + 1
+        q_start_month = ((q - 1) * 3) + 1
+        current_start = date(today.year, q_start_month, 1)
+        if q_start_month + 3 > 12:
+            next_q_start = date(today.year + 1, 1, 1)
+        else:
+            next_q_start = date(today.year, q_start_month + 3, 1)
+        current_end = next_q_start - timedelta(days=1)
+        prev_start = date(today.year - 1, q_start_month, 1)
+        if q_start_month + 3 > 12:
+            prev_next_q_start = date(today.year, 1, 1)
+        else:
+            prev_next_q_start = date(today.year - 1, q_start_month + 3, 1)
+        prev_end = prev_next_q_start - timedelta(days=1)
+
+        sales_fields = [
+            "id",
+            "name",
+            "date_order",
+            "amount_total",
+            "amount_untaxed",
+            "partner_id",
+            "team_id",
+            "user_id",
+            "state",
+        ]
+        try:
+            rows = client.execute_kw(
+                "sale.order",
+                "search_read",
+                [[["state", "in", ["sale", "done"]], ["date_order", ">=", prev_start.isoformat()], ["date_order", "<=", current_end.isoformat()]]],
+                {"fields": sales_fields, "limit": 1000, "order": "date_order desc, id desc"},
+            )
+        except xmlrpc.client.Fault as ex:
+            raise ValueError(_format_odoo_fault(ex)) from ex
+
+        partner_ids: set[int] = set()
+        for r in rows:
+            pval = r.get("partner_id")
+            if isinstance(pval, (list, tuple)) and pval:
+                try:
+                    partner_ids.add(int(pval[0]))
+                except (TypeError, ValueError):
+                    pass
+        partner_region: dict[int, str] = {}
+        if partner_ids:
+            try:
+                partner_rows = client.execute_kw(
+                    "res.partner",
+                    "search_read",
+                    [[["id", "in", sorted(partner_ids)]]],
+                    {"fields": ["id", "state_id", "country_id", "city"], "limit": len(partner_ids) + 10},
+                )
+            except xmlrpc.client.Fault:
+                partner_rows = []
+            for pr in partner_rows:
+                rid = int(pr.get("id") or 0)
+                state = pr.get("state_id")
+                country = pr.get("country_id")
+                city = str(pr.get("city") or "").strip()
+                region = ""
+                if isinstance(state, (list, tuple)) and len(state) > 1:
+                    region = str(state[1] or "").strip()
+                elif isinstance(country, (list, tuple)) and len(country) > 1:
+                    region = str(country[1] or "").strip()
+                elif city:
+                    region = city
+                partner_region[rid] = region or "Sin región"
+
+        def period_of(order_date: str) -> str:
+            dt = str(order_date or "")[:10]
+            if not dt:
+                return ""
+            if current_start.isoformat() <= dt <= current_end.isoformat():
+                return "current"
+            if prev_start.isoformat() <= dt <= prev_end.isoformat():
+                return "previous"
+            return ""
+
+        bucket: dict[tuple[str, str], dict[str, float]] = {}
+        for r in rows:
+            period = period_of(str(r.get("date_order") or ""))
+            if not period:
+                continue
+            partner = r.get("partner_id")
+            pid = int(partner[0]) if isinstance(partner, (list, tuple)) and partner else 0
+            region = partner_region.get(pid, "Sin región")
+            team = r.get("team_id")
+            channel = team[1] if isinstance(team, (list, tuple)) and len(team) > 1 else "Canal no definido"
+            key = (region, str(channel))
+            if key not in bucket:
+                bucket[key] = {"current_sales": 0.0, "previous_sales": 0.0, "current_net_margin": 0.0}
+            amt_total = float(r.get("amount_total") or 0.0)
+            amt_untaxed = float(r.get("amount_untaxed") or 0.0)
+            est_log_cost = amt_total * logistic_rate
+            est_margin_net = amt_untaxed - est_log_cost
+            if period == "current":
+                bucket[key]["current_sales"] += amt_total
+                bucket[key]["current_net_margin"] += est_margin_net
+            else:
+                bucket[key]["previous_sales"] += amt_total
+
+        items: list[dict[str, Any]] = []
+        for (region, channel), data in bucket.items():
+            cur = float(data["current_sales"])
+            prev = float(data["previous_sales"])
+            delta = cur - prev
+            growth_pct = ((delta / prev) * 100.0) if prev else 0.0
+            margin_net = float(data["current_net_margin"])
+            margin_net_pct = ((margin_net / cur) * 100.0) if cur else 0.0
+            items.append(
+                {
+                    "region": region,
+                    "channel": channel,
+                    "sales_current_quarter": round(cur, 2),
+                    "sales_same_quarter_last_year": round(prev, 2),
+                    "delta": round(delta, 2),
+                    "growth_pct": round(growth_pct, 2),
+                    "net_margin_estimated": round(margin_net, 2),
+                    "net_margin_pct": round(margin_net_pct, 2),
+                }
+            )
+        items.sort(key=lambda x: (x["region"], -x["sales_current_quarter"]))
+        return {
+            "query": "sales_quarter_compare",
+            "title": "Ventas trimestrales comparadas (región/canal)",
+            "count": len(items),
+            "items": items,
+            "meta": {
+                "current_period": f"{current_start.isoformat()} a {current_end.isoformat()}",
+                "previous_period": f"{prev_start.isoformat()} a {prev_end.isoformat()}",
+                "logistic_rate": logistic_rate,
+            },
+            "hint": "No hay ventas confirmadas para los periodos comparados." if not items else "",
+        }
     if query == "dashboard_overview":
         return _build_dashboard_overview(client)
     if query == "users_roles":
@@ -773,11 +1232,15 @@ def execute_list_query(app: AppSettings, query: str, params: dict[str, Any] | No
         }
     if query == "accounting_recent_actions":
         # "Acciones" recientes aproximadas por últimas facturas/documentos contables actualizados.
+        latest_only = bool(p.get("latest_only"))
+        domain: list[Any] = [["state", "in", ["draft", "posted", "cancel"]]]
+        if latest_only:
+            domain.append(["move_type", "in", ["out_invoice", "in_invoice"]])
         try:
             rows = client.execute_kw(
                 "account.move",
                 "search_read",
-                [[["state", "in", ["draft", "posted", "cancel"]]]],
+                [domain],
                 {
                     "fields": [
                         "id",
@@ -791,7 +1254,7 @@ def execute_list_query(app: AppSettings, query: str, params: dict[str, Any] | No
                         "currency_id",
                         "payment_state",
                     ],
-                    "limit": 120,
+                    "limit": 1 if latest_only else 120,
                     "order": "write_date desc, id desc",
                 },
             )
@@ -817,7 +1280,7 @@ def execute_list_query(app: AppSettings, query: str, params: dict[str, Any] | No
             )
         return {
             "query": "accounting_recent_actions",
-            "title": "Últimas acciones en facturación",
+            "title": "Última factura" if latest_only else "Últimas acciones en facturación",
             "count": len(items),
             "items": items,
         }
@@ -1107,6 +1570,111 @@ def execute_list_query(app: AppSettings, query: str, params: dict[str, Any] | No
                 "suggested_action": "Generar OC",
             })
         return {"query": query, "title": "Productos bajo mínimo", "count": len(items), "items": items}
+    if query == "demand_forecast_purchase_hints":
+        try:
+            horizon = int(p.get("horizon_months") or 3)
+        except (TypeError, ValueError):
+            horizon = 3
+        horizon = max(1, min(horizon, 12))
+        today = date.today()
+        start_90 = today - timedelta(days=90)
+        start_45 = today - timedelta(days=45)
+        start_90_s = start_90.isoformat()
+        start_45_s = start_45.isoformat()
+        today_end = f"{today.isoformat()} 23:59:59"
+
+        def _read_group_lines(domain: list) -> list:
+            try:
+                return client.execute_kw(
+                    "sale.order.line",
+                    "read_group",
+                    [domain, ["product_id", "product_uom_qty:sum"], ["product_id"]],
+                    {"lazy": False, "limit": 800},
+                )
+            except xmlrpc.client.Fault:
+                return []
+
+        domain_first = [
+            ["order_id.state", "in", ["sale", "done"]],
+            ["order_id.date_order", ">=", start_90_s],
+            ["order_id.date_order", "<", start_45_s],
+        ]
+        domain_second = [
+            ["order_id.state", "in", ["sale", "done"]],
+            ["order_id.date_order", ">=", start_45_s],
+            ["order_id.date_order", "<=", today_end],
+        ]
+        domain_all = [
+            ["order_id.state", "in", ["sale", "done"]],
+            ["order_id.date_order", ">=", start_90_s],
+            ["order_id.date_order", "<=", today_end],
+        ]
+
+        def _qty_by_product(rows: list) -> dict[int, tuple[float, str]]:
+            out: dict[int, tuple[float, str]] = {}
+            for r in rows or []:
+                pid_ex = r.get("product_id")
+                if not isinstance(pid_ex, (list, tuple)) or not pid_ex:
+                    continue
+                pid = int(pid_ex[0])
+                label = str(pid_ex[1] or f"ID {pid}")
+                out[pid] = (float(r.get("product_uom_qty") or 0.0), label)
+            return out
+
+        first_map = _qty_by_product(_read_group_lines(domain_first))
+        second_map = _qty_by_product(_read_group_lines(domain_second))
+        all_map = _qty_by_product(_read_group_lines(domain_all))
+        pids_sorted = sorted(all_map.keys(), key=lambda pid: -all_map[pid][0])[:40]
+        items: list[dict[str, Any]] = []
+        for pid in pids_sorted:
+            total_q, name = all_map[pid]
+            q1 = first_map.get(pid, (0.0, ""))[0]
+            q2 = second_map.get(pid, (0.0, ""))[0]
+            base_month = total_q / 3.0
+            trend = (q2 - q1) / (q1 + 1.0)
+            trend = max(-0.5, min(0.5, trend))
+            forecast_horizon = max(0.0, base_month * horizon * (1.0 + trend * 0.35))
+            hint = "Revisar reglas de reposición y lead time de proveedor."
+            try:
+                op_rows = client.execute_kw(
+                    "stock.warehouse.orderpoint",
+                    "search_read",
+                    [[["product_id", "=", pid]]],
+                    {"fields": ["qty_to_order", "product_min_qty"], "limit": 1},
+                )
+                if op_rows:
+                    qto = float(op_rows[0].get("qty_to_order") or 0.0)
+                    pmin = float(op_rows[0].get("product_min_qty") or 0.0)
+                    if qto > 0:
+                        hint = f"Reposición sugerida por regla: ~{round(qto, 1)} uds (mín. {round(pmin, 1)})."
+                    else:
+                        hint = f"Sin cantidad a pedir ahora (mín. {round(pmin, 1)}); vigilar tendencia vs pronóstico."
+            except xmlrpc.client.Fault:
+                pass
+            items.append(
+                {
+                    "product": name,
+                    "sold_qty_90d": round(total_q, 2),
+                    "avg_monthly": round(base_month, 2),
+                    "trend_pct": round(trend * 100.0, 1),
+                    "forecast_horizon_qty": round(forecast_horizon, 2),
+                    "purchase_hint": hint,
+                }
+            )
+        return {
+            "query": query,
+            "title": f"Proyección de demanda (~{horizon} meses) y compras",
+            "count": len(items),
+            "items": items,
+            "meta": {
+                "window_days": 90,
+                "horizon_months": horizon,
+                "method": "Promedio mensual últimos 90 días de ventas confirmadas, ajuste leve por tendencia 45d vs 45d previos; sugerencia de compra desde stock.warehouse.orderpoint si existe.",
+            },
+            "hint": ""
+            if items
+            else "No hay líneas de venta confirmadas en los últimos 90 días para proyectar.",
+        }
     if query == "best_vendor_for_product":
         product_name = str(p.get("product_name") or "").strip()
         qty = float(p.get("qty") or 1.0)
@@ -1179,11 +1747,50 @@ def execute_list_query(app: AppSettings, query: str, params: dict[str, Any] | No
                 }
             ],
         }
+    if query == "latest_product":
+        try:
+            rows = client.execute_kw(
+                "product.product",
+                "search_read",
+                [[["id", ">", 0]]],
+                {
+                    "fields": ["id", "name", "default_code", "create_date", "list_price", "standard_price", "active"],
+                    "limit": 1,
+                    "order": "id desc",
+                },
+            )
+        except xmlrpc.client.Fault as ex:
+            raise ValueError(_format_odoo_fault(ex)) from ex
+        items: list[dict[str, Any]] = []
+        for r in rows:
+            items.append(
+                {
+                    "id": int(r.get("id") or 0),
+                    "name": str(r.get("name") or ""),
+                    "default_code": str(r.get("default_code") or ""),
+                    "create_date": str(r.get("create_date") or ""),
+                    "list_price": float(r.get("list_price") or 0.0),
+                    "standard_price": float(r.get("standard_price") or 0.0),
+                    "active": bool(r.get("active")),
+                }
+            )
+        return {
+            "query": "latest_product",
+            "title": "Último producto ingresado",
+            "count": len(items),
+            "items": items,
+            "hint": "No encontré productos en la base." if not items else "",
+        }
 
+    order_ref = str(p.get("order_ref") or "").strip()
+    if order_ref:
+        domain: list[Any] = [["name", "=", order_ref]]
+    else:
+        domain = [["state", "in", ["sale", "done"]], ["delivery_status", "!=", "full"]]
     rows = client.execute_kw(
         "sale.order",
         "search_read",
-        [[["state", "in", ["sale", "done"]], ["delivery_status", "!=", "full"]]],
+        [domain],
         {
             "fields": [
                 "id",
@@ -1219,9 +1826,10 @@ def execute_list_query(app: AppSettings, query: str, params: dict[str, Any] | No
         )
     return {
         "query": "delivery_orders",
-        "title": "Órdenes por entregar",
+        "title": f"Orden {order_ref}" if order_ref else "Órdenes por entregar",
         "count": len(items),
         "items": items,
+        "hint": (f"No encontré la orden {order_ref} en pendientes de entrega." if order_ref and not items else ""),
     }
 
 
@@ -1750,7 +2358,13 @@ def execute_workflow(app: AppSettings, name: str, params: dict[str, Any]) -> dic
         raise ValueError(f"Workflow no implementado: {name}")
 
     client = OdooXmlRpc(app)
-    partner_name = str(p.get("partner_name") or "").strip()
+    partner_name = str(
+        p.get("partner_name")
+        or p.get("customer_name")
+        or p.get("partner")
+        or ""
+    ).strip()
+    partner_name = re.sub(r"^\s*cliente\s+", "", partner_name, flags=re.IGNORECASE).strip()
     product_name = str(p.get("product_name") or "").strip()
     try:
         amount = float(p.get("amount") or 0.0)
@@ -1819,19 +2433,59 @@ def execute_workflow(app: AppSettings, name: str, params: dict[str, Any]) -> dic
 
     invoice_id = 0
     try:
-        result = client.execute_kw("sale.order", "_create_invoices", [[so_id]])
-        if isinstance(result, list) and result:
-            invoice_id = int(result[0])
-        elif isinstance(result, dict) and result.get("res_id"):
-            invoice_id = int(result["res_id"])
-        else:
+        so_rows = client.execute_kw(
+            "sale.order",
+            "read",
+            [[so_id]],
+            {"fields": ["name"]},
+        )
+        so_name = str(so_rows[0].get("name") or "") if so_rows else ""
+        # 1) Intento de factura ya creada por automatizaciones del servidor.
+        if so_name:
             inv_rows = client.execute_kw(
-                "account.move", "search_read",
-                [[["invoice_origin", "=", str(client.execute_kw("sale.order", "read", [[so_id]], {"fields": ["name"]})[0]["name"])]]],
+                "account.move",
+                "search_read",
+                [[["invoice_origin", "=", so_name]]],
                 {"fields": ["id"], "limit": 1, "order": "id desc"},
             )
             if inv_rows:
                 invoice_id = int(inv_rows[0]["id"])
+        # 2) Intento con método público clásico (si existe en la versión).
+        if not invoice_id:
+            try:
+                client.execute_kw("sale.order", "action_create_invoice", [[so_id]])
+            except xmlrpc.client.Fault:
+                pass
+            if so_name:
+                inv_rows = client.execute_kw(
+                    "account.move",
+                    "search_read",
+                    [[["invoice_origin", "=", so_name]]],
+                    {"fields": ["id"], "limit": 1, "order": "id desc"},
+                )
+                if inv_rows:
+                    invoice_id = int(inv_rows[0]["id"])
+        # 3) Fallback compatible por XML-RPC: crear account.move manual.
+        if not invoice_id:
+            line_price = amount / max(qty, 1.0)
+            inv_payload: dict[str, Any] = {
+                "move_type": "out_invoice",
+                "partner_id": partner_id,
+                "invoice_origin": so_name or f"SO#{so_id}",
+                "ref": so_name or f"SO#{so_id}",
+                "invoice_line_ids": [
+                    (
+                        0,
+                        0,
+                        {
+                            "name": product_name or "Servicio",
+                            "quantity": qty,
+                            "price_unit": line_price,
+                        },
+                    )
+                ],
+            }
+            invoice_id = int(client.execute_kw("account.move", "create", [inv_payload]))
         steps.append({"step": "Factura", "ok": True, "detail": f"Factura generada (id {invoice_id})", "ref": invoice_id})
     except xmlrpc.client.Fault as ex:
         steps.append({"step": "Factura", "ok": False, "detail": _format_odoo_fault(ex)})

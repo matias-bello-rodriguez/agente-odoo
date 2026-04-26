@@ -6,7 +6,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        # Primero plantilla (.env.example), luego secretos locales (.env).
+        # El segundo archivo sobrescribe al primero para que OPENAI_API_KEY en .env gane siempre.
+        env_file=(".env.example", ".env"),
         env_file_encoding="utf-8",
         extra="ignore",
     )

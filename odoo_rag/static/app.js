@@ -256,6 +256,11 @@ composer.addEventListener("submit", async (e) => {
       openActionModal(data.draft_action);
     } else if (data.draft_action && data.draft_action.operation === "workflow") {
       openActionModal(data.draft_action);
+    } else if (data.draft_action && data.draft_action.operation === "erp") {
+      openActionModal(data.draft_action);
+      if (data.draft_action.kind === "read") {
+        await confirmActionInsert();
+      }
     } else if (data.draft_action && data.draft_action.values) {
       openActionModal(data.draft_action);
     }
@@ -745,6 +750,74 @@ function buildProductSetupSummary(plan) {
   return root;
 }
 
+function buildErpModal(draft) {
+  const k = draft.kind;
+  const spec = draft.spec || {};
+  const wrap = document.createElement("div");
+  wrap.className = "modal-plan-summary";
+  if (k === "read") {
+    actionModalLead.textContent = `Consulta en Odoo · modelo ${spec.model || ""}`;
+    actionModalConfirm.textContent = "Ejecutar consulta";
+    actionModalCancel.textContent = "Cerrar";
+  } else if (k === "write") {
+    actionModalLead.textContent = `Actualizar ${spec.model || ""} · id ${spec.record_id ?? "—"}`;
+    actionModalConfirm.textContent = "Guardar en Odoo";
+    const hint = document.createElement("p");
+    hint.className = "modal-erp-hint";
+    hint.textContent = "Editá solo los campos necesarios; el servidor valida permisos y campos permitidos.";
+    wrap.appendChild(hint);
+    const fieldsBox = document.createElement("div");
+    fieldsBox.className = "erp-write-fields";
+    for (const [key, val] of Object.entries(spec.values || {})) {
+      const row = document.createElement("div");
+      row.className = "modal-field-row";
+      const lab = document.createElement("label");
+      lab.textContent = FIELD_LABELS[key] || key;
+      let inp;
+      if (typeof val === "boolean") {
+        inp = document.createElement("input");
+        inp.type = "checkbox";
+        inp.dataset.field = key;
+        inp.checked = val;
+      } else if (typeof val === "number") {
+        inp = document.createElement("input");
+        inp.type = "number";
+        inp.step = "any";
+        inp.dataset.field = key;
+        inp.value = String(val);
+      } else {
+        inp = document.createElement("input");
+        inp.type = "text";
+        inp.dataset.field = key;
+        inp.value = val == null ? "" : String(val);
+      }
+      row.appendChild(lab);
+      row.appendChild(inp);
+      fieldsBox.appendChild(row);
+    }
+    wrap.appendChild(fieldsBox);
+  } else if (k === "archive") {
+    actionModalLead.textContent = `Archivar (desactivar) registros en ${spec.model || ""}`;
+    actionModalConfirm.textContent = "Archivar en Odoo";
+    const warn = document.createElement("p");
+    warn.className = "modal-erp-warn";
+    warn.textContent = `Se desactivarán los ids: ${(spec.record_ids || []).join(", ")}.`;
+    wrap.appendChild(warn);
+  } else if (k === "unlink") {
+    actionModalLead.textContent = "Eliminación física en Odoo";
+    actionModalConfirm.textContent = "Eliminar definitivamente";
+    const warn = document.createElement("p");
+    warn.className = "modal-erp-warn";
+    warn.textContent = `Productos ids: ${(spec.record_ids || []).join(", ")}. Esta acción no se puede deshacer desde aquí.`;
+    wrap.appendChild(warn);
+  }
+  const pre = document.createElement("pre");
+  pre.className = "modal-erp-json";
+  pre.textContent = JSON.stringify(spec, null, 2);
+  wrap.appendChild(pre);
+  actionModalForm.appendChild(wrap);
+}
+
 function openActionModal(draft) {
   pendingActionDraft = draft;
   actionModalTitle.textContent = draft.summary || "Confirmar inserción";
@@ -772,6 +845,9 @@ function openActionModal(draft) {
     actionModalLead.textContent = "Workflow encadenado: cliente → cotización → venta → factura → validación.";
     actionModalConfirm.textContent = "Ejecutar flujo";
     buildWorkflowFields(draft);
+  } else if (draft.operation === "erp" && draft.kind) {
+    actionModalTitle.textContent = draft.summary || `ERP · ${draft.kind}`;
+    buildErpModal(draft);
   } else {
     actionModalLead.textContent = `${draft.model} · alta nueva`;
     buildModalFields(draft.model, draft.values);
@@ -808,6 +884,45 @@ async function confirmActionInsert() {
   if (!pendingActionDraft) return;
   actionModalConfirm.disabled = true;
   try {
+    if (pendingActionDraft.operation === "erp" && pendingActionDraft.kind) {
+      const kind = pendingActionDraft.kind;
+      let spec = { ...(pendingActionDraft.spec || {}) };
+      if (kind === "write") {
+        const g = gatherModalValues();
+        spec = { ...spec, values: { ...(spec.values || {}), ...g } };
+      }
+      const res = await fetch("/api/action/erp", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ kind, spec }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        showToast(formatDetail(data.detail) || "Error en operación ERP.", true);
+        appendMessage(
+          "assistant",
+          formatDetail(data.detail) || "Odoo rechazó la operación."
+        );
+        actionModalConfirm.disabled = false;
+        return;
+      }
+      if (kind === "read") {
+        renderErpReadResult(data);
+        actionModalConfirm.disabled = false;
+        return;
+      }
+      let msg = "Operación aplicada en Odoo.";
+      if (kind === "write")
+        msg = `Actualizado ${data.model || ""} id ${data.id ?? ""}. Campos: ${(data.updated || []).join(", ")}.`;
+      else if (kind === "archive")
+        msg = `Archivados (desactivados) en ${data.model || ""}: ids ${(data.archived_ids || []).join(", ")}.`;
+      else if (kind === "unlink")
+        msg = `Eliminados en ${data.model || ""}: ids ${(data.deleted_ids || []).join(", ")}.`;
+      showToast("Listo.");
+      appendMessage("assistant", msg, { odoo_links: data.odoo_links || [] });
+      closeActionModal();
+      return;
+    }
     if (pendingActionDraft.operation === "list" && pendingActionDraft.query) {
       const res = await fetch("/api/action/list", {
         method: "POST",
@@ -864,9 +979,10 @@ async function confirmActionInsert() {
     }
     if (pendingActionDraft.operation === "workflow") {
       const vals = gatherModalValues();
+      const draftParams = pendingActionDraft.params || {};
       const params = {
-        partner_name: vals.partner_name || "",
-        product_name: vals.product_name || "",
+        partner_name: vals.partner_name || draftParams.partner_name || draftParams.customer_name || "",
+        product_name: vals.product_name || draftParams.product_name || "",
         amount: vals.amount ? Number(vals.amount) : 0,
         qty: vals.qty ? Number(vals.qty) : 1,
       };
@@ -1077,9 +1193,55 @@ function renderDashboardResult(data) {
   }
 }
 
+function renderErpReadResult(data) {
+  actionModalTitle.textContent = data.title || "Consulta ERP";
+  const meta = data.meta || {};
+  actionModalLead.textContent = `Modelo ${meta.model || ""} · ${Number(data.count || 0)} filas · límite ${meta.limit ?? "—"}`;
+  actionModalForm.innerHTML = "";
+  const items = Array.isArray(data.items) ? data.items : [];
+  const fields = Array.isArray(data.fields) ? data.fields : [];
+  if (!items.length) {
+    const box = document.createElement("div");
+    box.className = "modal-plan-summary";
+    const msg = document.createElement("div");
+    msg.textContent = data.hint || "La consulta no devolvió filas.";
+    box.appendChild(msg);
+    actionModalForm.appendChild(box);
+    return;
+  }
+  const table = document.createElement("table");
+  table.className = "modal-table";
+  const thead = document.createElement("thead");
+  const trh = document.createElement("tr");
+  for (const f of fields) {
+    const th = document.createElement("th");
+    th.textContent = f;
+    trh.appendChild(th);
+  }
+  thead.appendChild(trh);
+  table.appendChild(thead);
+  const tbody = document.createElement("tbody");
+  for (const it of items) {
+    const tr = document.createElement("tr");
+    for (const f of fields) {
+      const td = document.createElement("td");
+      const v = it[f];
+      td.textContent = v == null ? "" : String(v);
+      tr.appendChild(td);
+    }
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  actionModalForm.appendChild(table);
+}
+
 function renderListResult(data) {
   if (data.query === "dashboard_overview") {
     renderDashboardResult(data);
+    return;
+  }
+  if (data.query === "erp_read") {
+    renderErpReadResult(data);
     return;
   }
   actionModalTitle.textContent = data.title || "Lista";
@@ -1106,10 +1268,20 @@ function renderListResult(data) {
                     ? "No hay facturas vencidas."
                     : data.query === "low_stock_products"
                       ? "No hay productos bajo mínimo."
-                      : data.query === "best_vendor_for_product"
+                      : data.query === "demand_forecast_purchase_hints"
+                        ? "No hay ventas recientes suficientes para proyectar demanda."
+                        : data.query === "erp_read"
+                          ? "La consulta no devolvió filas."
+                          : data.query === "best_vendor_for_product"
                         ? "No hay proveedores configurados para ese producto."
                         : data.query === "payroll_preview"
                           ? "No hay datos para cálculo de nómina."
+                          : data.query === "latest_product"
+                            ? "No hay productos registrados."
+                            : data.query === "sales_quarter_compare"
+                              ? "No hay ventas para comparar en esos periodos."
+                              : data.query === "customers_drop_with_active_contracts"
+                                ? "No hay clientes con caída >20% que cumplan los filtros."
         : "No hay órdenes pendientes por entregar.";
     const msg = document.createElement("div");
     msg.textContent = data.hint || emptyMsg;
@@ -1163,12 +1335,24 @@ function renderListResult(data) {
   } else if (data.query === "low_stock_products") {
     thead.innerHTML =
       "<tr><th>Producto</th><th class='num'>Mínimo</th><th class='num'>Máximo</th><th class='num'>Sugerido</th><th>Acción</th></tr>";
+  } else if (data.query === "demand_forecast_purchase_hints") {
+    thead.innerHTML =
+      "<tr><th>Producto</th><th class='num'>Vendido 90 d</th><th class='num'>Prom. mensual</th><th class='num'>Tend. %</th><th class='num'>Pronóstico periodo</th><th>Sugerencia compras</th></tr>";
   } else if (data.query === "best_vendor_for_product") {
     thead.innerHTML =
       "<tr><th>Proveedor</th><th class='num'>Precio</th><th class='num'>Cant. mínima</th><th class='num'>Lead time (días)</th><th>Mejor opción</th></tr>";
   } else if (data.query === "payroll_preview") {
     thead.innerHTML =
       "<tr><th>Empleado</th><th class='num'>Sueldo base</th><th class='num'>Horas extra</th><th class='num'>Bono</th><th class='num'>Pago extra</th><th class='num'>Total</th><th>Nota</th></tr>";
+  } else if (data.query === "latest_product") {
+    thead.innerHTML =
+      "<tr><th>Producto</th><th>Referencia</th><th>Creado</th><th class='num'>Precio venta</th><th class='num'>Costo</th><th>Activo</th></tr>";
+  } else if (data.query === "sales_quarter_compare") {
+    thead.innerHTML =
+      "<tr><th>Región</th><th>Canal</th><th class='num'>Ventas trimestre actual</th><th class='num'>Mismo trimestre año pasado</th><th class='num'>Δ</th><th class='num'>Crecimiento %</th><th class='num'>Margen neto est.</th><th class='num'>Margen %</th></tr>";
+  } else if (data.query === "customers_drop_with_active_contracts") {
+    thead.innerHTML =
+      "<tr><th>Cliente</th><th class='num'>Mes -2</th><th class='num'>Mes -1</th><th class='num'>Caída %</th><th>Contrato activo</th><th>Incidencias facturación</th></tr>";
   } else {
     thead.innerHTML =
       "<tr><th>Pedido</th><th>Cliente</th><th>Fecha</th><th class='num'>Total</th><th>Entrega</th><th>Factura</th></tr>";
@@ -1198,6 +1382,21 @@ function renderListResult(data) {
     if (v === "partial") return "Pago parcial";
     if (v === "in_payment") return "En pago";
     if (v === "reversed") return "Revertido";
+    return value || "";
+  };
+  const mapDeliveryStatus = (value) => {
+    const v = String(value || "").toLowerCase();
+    if (v === "pending") return "Pendiente";
+    if (v === "partially") return "Parcial";
+    if (v === "full") return "Completa";
+    return value || "";
+  };
+  const mapInvoiceStatus = (value) => {
+    const v = String(value || "").toLowerCase();
+    if (v === "to invoice") return "Por facturar";
+    if (v === "upselling") return "Venta adicional";
+    if (v === "invoiced") return "Facturada";
+    if (v === "no") return "Nada que facturar";
     return value || "";
   };
   if (data.query === "users_roles") {
@@ -1283,6 +1482,20 @@ function renderListResult(data) {
         <td>${it.suggested_action || ""}</td>`;
       tbody.appendChild(tr);
     }
+  } else if (data.query === "demand_forecast_purchase_hints") {
+    if (data.meta && data.meta.horizon_months != null) {
+      actionModalLead.textContent = `Ventana ${Number(data.meta.window_days || 90)} días · horizonte ${Number(data.meta.horizon_months)} mes(es).`;
+    }
+    for (const it of items) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>${it.product || ""}</td>
+        <td class="num">${Number(it.sold_qty_90d || 0).toLocaleString()}</td>
+        <td class="num">${Number(it.avg_monthly || 0).toLocaleString()}</td>
+        <td class="num">${Number(it.trend_pct || 0).toLocaleString()}%</td>
+        <td class="num">${Number(it.forecast_horizon_qty || 0).toLocaleString()}</td>
+        <td>${it.purchase_hint || ""}</td>`;
+      tbody.appendChild(tr);
+    }
   } else if (data.query === "best_vendor_for_product") {
     for (const it of items) {
       const tr = document.createElement("tr");
@@ -1305,6 +1518,47 @@ function renderListResult(data) {
         <td>${it.message || ""}</td>`;
       tbody.appendChild(tr);
     }
+  } else if (data.query === "latest_product") {
+    for (const it of items) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>${it.name || ""}</td>
+        <td>${it.default_code || ""}</td>
+        <td>${(it.create_date || "").replace("T", " ").slice(0, 19)}</td>
+        <td class="num">${Number(it.list_price || 0).toLocaleString()}</td>
+        <td class="num">${Number(it.standard_price || 0).toLocaleString()}</td>
+        <td>${it.active ? "Sí" : "No"}</td>`;
+      tbody.appendChild(tr);
+    }
+  } else if (data.query === "sales_quarter_compare") {
+    if (data.meta && data.meta.current_period && data.meta.previous_period) {
+      actionModalLead.textContent = `Comparando ${data.meta.current_period} vs ${data.meta.previous_period} · costo logístico variable ${(Number(data.meta.logistic_rate || 0) * 100).toFixed(1)}%`;
+    }
+    for (const it of items) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>${it.region || ""}</td>
+        <td>${it.channel || ""}</td>
+        <td class="num">${Number(it.sales_current_quarter || 0).toLocaleString()}</td>
+        <td class="num">${Number(it.sales_same_quarter_last_year || 0).toLocaleString()}</td>
+        <td class="num">${Number(it.delta || 0).toLocaleString()}</td>
+        <td class="num">${Number(it.growth_pct || 0).toLocaleString()}%</td>
+        <td class="num">${Number(it.net_margin_estimated || 0).toLocaleString()}</td>
+        <td class="num">${Number(it.net_margin_pct || 0).toLocaleString()}%</td>`;
+      tbody.appendChild(tr);
+    }
+  } else if (data.query === "customers_drop_with_active_contracts") {
+    if (data.meta && data.meta.month_prev2 && data.meta.month_prev1) {
+      actionModalLead.textContent = `Comparación mensual ${data.meta.month_prev2} vs ${data.meta.month_prev1} · umbral caída ${Number(data.meta.drop_threshold_pct || 20).toFixed(1)}%`;
+    }
+    for (const it of items) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>${it.customer || ""}</td>
+        <td class="num">${Number(it.month_prev2_sales || 0).toLocaleString()}</td>
+        <td class="num">${Number(it.month_prev1_sales || 0).toLocaleString()}</td>
+        <td class="num">${Number(it.drop_pct || 0).toLocaleString()}%</td>
+        <td>${it.has_active_contract ? "Sí" : "No"}</td>
+        <td>${Number(it.billing_incidents || 0).toLocaleString()}</td>`;
+      tbody.appendChild(tr);
+    }
   } else {
     for (const it of items) {
       const tr = document.createElement("tr");
@@ -1312,8 +1566,8 @@ function renderListResult(data) {
         <td>${it.customer || ""}</td>
         <td>${(it.date_order || "").slice(0, 10)}</td>
         <td class="num">${Number(it.amount_total || 0).toLocaleString()}</td>
-        <td>${it.delivery_status || ""}</td>
-        <td>${it.invoice_status || ""}</td>`;
+        <td>${mapDeliveryStatus(it.delivery_status)}</td>
+        <td>${mapInvoiceStatus(it.invoice_status)}</td>`;
       tbody.appendChild(tr);
     }
   }

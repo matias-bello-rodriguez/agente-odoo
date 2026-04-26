@@ -45,7 +45,11 @@ class OdooXmlRpc:
             )
             if not uid:
                 raise RuntimeError(
-                    "Autenticación Odoo fallida: revisa ODOO_URL, ODOO_DB, ODOO_USERNAME y ODOO_PASSWORD."
+                    "Autenticación Odoo fallida: usuario/clave inválidos o base no coincide. "
+                    f"Config actual -> ODOO_URL={self._settings.odoo_url}, "
+                    f"ODOO_DB={self._settings.odoo_db}, "
+                    f"ODOO_USERNAME={self._settings.odoo_username}. "
+                    "Verifica que puedas iniciar sesión en Odoo Web con esa misma base y usuario."
                 )
             self._uid = int(uid)
         return self._uid
