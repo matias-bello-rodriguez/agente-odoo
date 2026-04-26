@@ -731,6 +731,89 @@ body {
   color: var(--text-secondary);
 }
 
+.modal-impact-card {
+  margin: 0;
+  border: 1px solid var(--border-hairline);
+  border-left: 4px solid var(--text-tertiary);
+  background: var(--bg-muted);
+  border-radius: 12px;
+  padding: 0.72rem 0.82rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.modal-impact-card.risk-low {
+  border-left-color: var(--success);
+}
+
+.modal-impact-card.risk-medium {
+  border-left-color: var(--warning);
+}
+
+.modal-impact-card.risk-high {
+  border-left-color: var(--danger);
+}
+
+.modal-impact-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+.modal-impact-head strong {
+  font-size: 0.82rem;
+  letter-spacing: 0.01em;
+}
+
+.modal-impact-risk {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.modal-impact-summary {
+  margin: 0;
+  font-size: 0.83rem;
+  color: var(--text);
+  line-height: 1.35;
+}
+
+.modal-impact-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.55rem;
+}
+
+.modal-impact-grid div {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-hairline);
+  border-radius: 10px;
+  padding: 0.45rem 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.modal-impact-grid span {
+  font-size: 0.69rem;
+  color: var(--text-tertiary);
+}
+
+.modal-impact-grid b {
+  font-size: 0.79rem;
+  color: var(--text);
+}
+
+.modal-impact-list {
+  margin: 0;
+  padding-left: 1.05rem;
+  color: var(--text-secondary);
+  font-size: 0.79rem;
+  line-height: 1.35;
+}
+
 .modal-table {
   width: 100%;
   border-collapse: collapse;

@@ -818,10 +818,183 @@ function buildErpModal(draft) {
   actionModalForm.appendChild(wrap);
 }
 
+function estimateActionImpact(draft) {
+  const out = {
+    title: "Impacto estimado",
+    summary: "Acción no clasificada.",
+    records: "No determinado",
+    risk: "Medio",
+    reversible: "Parcial",
+    bullets: [],
+  };
+  if (!draft || !draft.operation) return out;
+
+  const op = String(draft.operation);
+  if (op === "create") {
+    out.summary = `Se creará 1 registro nuevo en ${draft.model || "Odoo"}.`;
+    out.records = "1 registro nuevo";
+    out.risk = "Medio";
+    out.reversible = "Parcial";
+    out.bullets = [
+      "No modifica registros existentes.",
+      "Puedes archivarlo o editarlo luego según modelo.",
+    ];
+    return out;
+  }
+
+  if (op === "erp") {
+    const kind = String(draft.kind || "").toLowerCase();
+    const spec = draft.spec || {};
+    if (kind === "read") {
+      const lim = Number(spec.limit || 0);
+      out.summary = `Consulta de datos en ${spec.model || "Odoo"} sin cambios.`;
+      out.records = lim > 0 ? `Hasta ${lim} filas` : "Sin límite explícito";
+      out.risk = "Bajo";
+      out.reversible = "Sí (solo lectura)";
+      out.bullets = ["No persiste cambios.", "Solo muestra resultados para análisis."];
+      return out;
+    }
+    if (kind === "write") {
+      const vals = spec.values || {};
+      const nFields = Object.keys(vals).length;
+      out.summary = `Actualizará el registro ${spec.record_id || "?"} en ${spec.model || "Odoo"}.`;
+      out.records = "1 registro";
+      out.risk = "Medio";
+      out.reversible = "Parcial";
+      out.bullets = [
+        `Campos estimados a cambiar: ${nFields}.`,
+        "Requiere validar datos antes de confirmar.",
+      ];
+      return out;
+    }
+    if (kind === "archive") {
+      const ids = Array.isArray(spec.record_ids) ? spec.record_ids : [];
+      out.summary = `Archivará (desactivará) registros en ${spec.model || "Odoo"}.`;
+      out.records = `${ids.length} registro(s)`;
+      out.risk = "Medio";
+      out.reversible = "Sí (reactivando active=true)";
+      out.bullets = [
+        "No borra físicamente los registros.",
+        "Puede afectar listados y reportes por estado activo.",
+      ];
+      return out;
+    }
+    if (kind === "unlink") {
+      const ids = Array.isArray(spec.record_ids) ? spec.record_ids : [];
+      out.summary = `Eliminará definitivamente registros en ${spec.model || "Odoo"}.`;
+      out.records = `${ids.length} registro(s)`;
+      out.risk = "Alto";
+      out.reversible = "No";
+      out.bullets = [
+        "Borrado físico (hard delete).",
+        "Puede romper trazabilidad y referencias históricas.",
+      ];
+      return out;
+    }
+    return out;
+  }
+
+  if (op === "list") {
+    out.summary = "Consulta analítica/listado sin escritura en Odoo.";
+    out.records = "Variable (según query)";
+    out.risk = "Bajo";
+    out.reversible = "Sí (solo lectura)";
+    out.bullets = [
+      "No modifica datos del ERP.",
+      "Puede consumir tiempo si la consulta es grande.",
+    ];
+    return out;
+  }
+
+  if (op === "email") {
+    out.summary = "Enviará un correo desde Odoo.";
+    out.records = "1 mensaje";
+    out.risk = "Medio";
+    out.reversible = "No (si ya fue entregado)";
+    out.bullets = [
+      "Revisar destinatario y asunto antes de confirmar.",
+      "Puede generar comunicación externa inmediata.",
+    ];
+    return out;
+  }
+
+  if (op === "workflow") {
+    out.summary = "Ejecutará un flujo encadenado de múltiples pasos.";
+    out.records = "Múltiples registros";
+    out.risk = "Alto";
+    out.reversible = "Parcial";
+    out.bullets = [
+      "Puede crear cliente, venta, factura y/o movimientos.",
+      "Si un paso falla, algunos pasos previos pueden quedar aplicados.",
+    ];
+    return out;
+  }
+
+  if (op === "product_setup") {
+    out.summary = "Creará o configurará producto y reglas relacionadas.";
+    out.records = "Múltiples registros técnicos";
+    out.risk = "Medio";
+    out.reversible = "Parcial";
+    out.bullets = [
+      "Impacta inventario, reposición y compras.",
+      "Revisar parámetros de stock mínimo y lead times.",
+    ];
+    return out;
+  }
+  return out;
+}
+
+function impactRiskClass(risk) {
+  const r = String(risk || "").toLowerCase();
+  if (r === "alto") return "risk-high";
+  if (r === "bajo") return "risk-low";
+  return "risk-medium";
+}
+
+function escapeModalHtml(s) {
+  return String(s || "").replace(/[&<>"']/g, (c) => {
+    const map = {
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;",
+    };
+    return map[c] || c;
+  });
+}
+
+function buildImpactCard(draft) {
+  const est = estimateActionImpact(draft);
+  const card = document.createElement("section");
+  card.className = `modal-impact-card ${impactRiskClass(est.risk)}`;
+  const bullets = Array.isArray(est.bullets) ? est.bullets : [];
+  card.innerHTML = `
+    <div class="modal-impact-head">
+      <strong>${escapeModalHtml(est.title)}</strong>
+      <span class="modal-impact-risk">Riesgo: ${escapeModalHtml(est.risk)}</span>
+    </div>
+    <p class="modal-impact-summary">${escapeModalHtml(est.summary)}</p>
+    <div class="modal-impact-grid">
+      <div><span>Registros</span><b>${escapeModalHtml(est.records)}</b></div>
+      <div><span>Reversible</span><b>${escapeModalHtml(est.reversible)}</b></div>
+    </div>
+    ${
+      bullets.length
+        ? `<ul class="modal-impact-list">${bullets
+            .map((it) => `<li>${escapeModalHtml(it)}</li>`)
+            .join("")}</ul>`
+        : ""
+    }
+  `;
+  return card;
+}
+
 function openActionModal(draft) {
   pendingActionDraft = draft;
   actionModalTitle.textContent = draft.summary || "Confirmar inserción";
   actionModalForm.innerHTML = "";
+  actionModalForm.appendChild(buildImpactCard(draft));
   actionModalConfirm.hidden = false;
   actionModalCancel.textContent = "Cancelar";
   actionModalConfirm.textContent = "Insertar en Odoo";
