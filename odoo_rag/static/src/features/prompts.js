@@ -1,5 +1,4 @@
-import { dom } from "../dom.js";
-import { autoResizeComposer } from "../ui/composer.js";
+import { runChatMessage } from "./chat.js";
 
 function applyModuleSelection(moduleId, label) {
   document
@@ -16,9 +15,7 @@ export function attachPrompts() {
       const prompt = btn.dataset.prompt || "";
       applyModuleSelection(moduleId, btn.textContent.trim());
       if (prompt) {
-        dom.inputEl.value = prompt;
-        autoResizeComposer();
-        dom.inputEl.focus();
+        void runChatMessage(prompt);
       }
     });
   });
@@ -27,9 +24,7 @@ export function attachPrompts() {
     btn.addEventListener("click", () => {
       const p = btn.dataset.prompt || "";
       if (!p) return;
-      dom.inputEl.value = p;
-      autoResizeComposer();
-      dom.inputEl.focus();
+      void runChatMessage(p);
     });
   });
 }
