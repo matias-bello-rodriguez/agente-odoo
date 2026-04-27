@@ -38,6 +38,7 @@ from odoo_rag.config import load_settings
 from odoo_rag.rag import build_or_rebuild_index
 from odoo_rag.reports import monthly_sales_report, summarize_data
 from odoo_rag.suggestions import SUGGEST_KINDS, suggest
+from odoo_rag.tools.executor import execute_tool
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
@@ -258,7 +259,12 @@ async def api_action_execute(body: ActionExecuteBody, request: Request) -> dict:
 
     def run() -> int:
         with time_block("action.create", model=body.model, role=role):
-            return execute_create(settings, body.model, body.values)
+            out = execute_tool(
+                settings,
+                "odoo.create",
+                {"model": body.model, "values": body.values},
+            )
+            return int(out["id"])
 
     try:
         new_id = await asyncio.to_thread(run)
@@ -345,7 +351,11 @@ async def api_action_list(body: ActionListBody, request: Request) -> dict:
 
     def run() -> dict:
         with time_block("action.list", query=body.query):
-            data = execute_list_query(settings, body.query, body.params)
+            data = execute_tool(
+                settings,
+                "list.query",
+                {"query": body.query, "params": body.params},
+            )
             if body.summarize:
                 summary = summarize_data(settings, data, intent=str(data.get("title") or body.query))
                 data["summary"] = summary.get("summary", "")
@@ -371,7 +381,11 @@ async def api_action_email(body: ActionEmailBody, request: Request) -> dict:
 
     def run() -> dict:
         with time_block("action.email", target=body.target):
-            return execute_email_action(settings, body.target, body.params)
+            return execute_tool(
+                settings,
+                "odoo.email",
+                {"target": body.target, "params": body.params},
+            )
 
     try:
         result = await asyncio.to_thread(run)
@@ -397,7 +411,11 @@ async def api_action_erp(body: ErpActionBody, request: Request) -> dict:
 
     def run() -> dict:
         with time_block(f"action.erp.{kind}", role=role):
-            return execute_erp_action(settings, body.kind, body.spec)
+            return execute_tool(
+                settings,
+                "odoo.erp",
+                {"kind": kind or "read", "spec": body.spec},
+            )
 
     try:
         result = await asyncio.to_thread(run)
@@ -421,7 +439,11 @@ async def api_action_workflow(body: ActionWorkflowBody, request: Request) -> dic
 
     def run() -> dict:
         with time_block("action.workflow", name=body.name):
-            return execute_workflow(settings, body.name, body.params)
+            return execute_tool(
+                settings,
+                "odoo.workflow",
+                {"name": body.name, "params": body.params},
+            )
 
     try:
         result = await asyncio.to_thread(run)

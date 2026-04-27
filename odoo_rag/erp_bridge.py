@@ -80,6 +80,35 @@ ERP_READ_CONFIG: dict[str, dict[str, Any]] = {
         "domain_fields": frozenset({"id", "name", "state", "partner_id", "invoice_status", "amount_total"}),
         "max_limit": 80,
     },
+    "sale.order.line": {
+        "read_fields": frozenset(
+            {
+                "id",
+                "order_id",
+                "name",
+                "product_id",
+                "product_uom_qty",
+                "price_unit",
+                "tax_id",
+            }
+        ),
+        "domain_fields": frozenset({"id", "order_id", "name", "product_id"}),
+        "max_limit": 200,
+    },
+    "account.tax": {
+        "read_fields": frozenset(
+            {
+                "id",
+                "name",
+                "amount",
+                "amount_type",
+                "type_tax_use",
+                "active",
+            }
+        ),
+        "domain_fields": frozenset({"id", "name", "amount", "amount_type", "type_tax_use", "active"}),
+        "max_limit": 100,
+    },
     "purchase.order": {
         "read_fields": frozenset(
             {"id", "name", "partner_id", "date_order", "state", "amount_total"}
@@ -136,6 +165,8 @@ ERP_WRITE_FIELDS: dict[str, frozenset[str]] = {
         {"name", "default_code", "list_price", "standard_price", "type", "active", "barcode"}
     ),
     "sale.order": frozenset({"note", "client_order_ref"}),
+    # Impuestos se aplican por línea (sale.order.line.tax_id), no en sale.order.
+    "sale.order.line": frozenset({"tax_id"}),
     "purchase.order": frozenset({"notes", "partner_ref"}),
     "account.move": frozenset({"ref", "narration"}),
 }
@@ -263,6 +294,24 @@ def sanitize_erp_write_draft(model: str, record_id: Any, values: Any) -> dict[st
             t = str(raw).lower().strip()
             if t in ("consu", "service", "combo"):
                 clean[key] = t
+            continue
+        if key == "tax_id":
+            # Many2many: solo permitimos setear lista de impuestos por ids.
+            # Acepta: int | [int, ...] y lo transforma a comando (6,0,ids).
+            ids: list[int] = []
+            if isinstance(raw, int):
+                ids = [int(raw)] if int(raw) > 0 else []
+            elif isinstance(raw, list):
+                for x in raw[:12]:
+                    try:
+                        i = int(x)
+                    except (TypeError, ValueError):
+                        continue
+                    if i > 0 and i not in ids:
+                        ids.append(i)
+            if not ids:
+                continue
+            clean[key] = [(6, 0, ids)]
             continue
         clean[key] = str(raw).strip()[:_STR_MAX] if isinstance(raw, str) else raw
     if not clean:
